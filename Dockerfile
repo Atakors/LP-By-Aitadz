@@ -12,7 +12,7 @@ RUN addgroup --system aitadz && adduser --system --ingroup aitadz aitadz
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py bot.py didactic_rules.py docx_builder.py mcp_client.py ./
+COPY app.py bot.py database.py didactic_rules.py docx_builder.py mcp_client.py ./
 
 RUN chown -R aitadz:aitadz /app
 USER aitadz

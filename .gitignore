@@ -22,3 +22,8 @@ tmp/
 .wrangler/
 node_modules/
 .dev.vars
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm

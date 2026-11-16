@@ -459,16 +459,20 @@ def test_generation_pipeline_sends_docx_and_cleans_up_temp_file():
     fake_bot.delete_message.assert_called_once_with(123456, 42)
 
 
-def test_bot_wizard_full_handler_flow(monkeypatch):
+def test_bot_wizard_full_handler_flow(monkeypatch, tmp_path: Path):
+    from database import Database
+
     sent_messages = []
     edited_messages = []
     sent_docs = []
 
+    test_db = Database(db_path=str(tmp_path / "wizard.db"), default_credits=5)
     offline_mcp = CloudflareMCPClient(portal_url="", cf_client_id="", cf_client_secret="")
     test_bot = bot_module.create_bot(
         token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
         mcp_client_factory=lambda: offline_mcp,
         async_dispatch=False,
+        db=test_db,
     )
 
     monkeypatch.setattr(
@@ -585,3 +589,109 @@ def test_resilient_env_token_and_webhook_url_resolution(monkeypatch):
 
     monkeypatch.setenv("WEBHOOK_BASE_URL", '"https://custom.aitadz.pro/webhook/"')
     assert app_module.resolve_webhook_base_url() == "https://custom.aitadz.pro"
+
+
+def test_database_credits_and_stats(tmp_path: Path):
+    from database import Database
+
+    db = Database(db_path=str(tmp_path / "stats.db"), default_credits=2)
+    u1 = db.upsert_user(user_id=101, chat_id=101, username="teacher1", first_name="Nadia")
+    assert u1["credits"] == 2
+
+    ok, rem = db.consume_credit(101, 1)
+    assert ok is True and rem == 1
+    db.record_generation(101, "3PS", "3ps-seq-1", "3ps-s1-1", "3ps-listen-repeat", "Family")
+
+    ok2, rem2 = db.consume_credit(101, 1)
+    assert ok2 is True and rem2 == 0
+
+    ok3, rem3 = db.consume_credit(101, 1)
+    assert ok3 is False and rem3 == 0
+
+    # Admin grant restores credits
+    new_bal = db.add_credits(101, 5, reason="admin_grant", admin_id=999)
+    assert new_bal == 5
+
+    # Admin user bypasses deduction
+    db.upsert_user(user_id=999, chat_id=999, username="sadek", first_name="Sadek", is_admin=True)
+    ok_adm, _ = db.consume_credit(999, 1)
+    assert ok_adm is True
+
+    stats = db.get_stats()
+    assert stats["total_users"] == 2
+    assert stats["total_generations"] == 1
+    assert stats["by_grade"]["3PS"] == 1
+    assert "teacher1" in db.export_users_csv()
+    db.close()
+
+
+def test_admin_stats_and_credit_enforcement_in_bot(monkeypatch, tmp_path: Path):
+    from database import Database
+
+    monkeypatch.setenv("ADMIN_ID", "888888")
+    test_db = Database(db_path=str(tmp_path / "bot_admin.db"), default_credits=1)
+    sent_messages = []
+
+    offline_mcp = CloudflareMCPClient(portal_url="", cf_client_id="", cf_client_secret="")
+    test_bot = bot_module.create_bot(
+        token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        mcp_client_factory=lambda: offline_mcp,
+        async_dispatch=False,
+        db=test_db,
+    )
+    monkeypatch.setattr(
+        test_bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: (
+            sent_messages.append((chat_id, text)),
+            SimpleNamespace(message_id=len(sent_messages)),
+        )[1],
+    )
+
+    # Non-admin tries /stats -> denied
+    non_admin_stats = bot_module.telebot.types.Update.de_json(
+        {
+            "update_id": 10,
+            "message": {
+                "message_id": 10,
+                "date": 1700000000,
+                "chat": {"id": 555, "type": "private"},
+                "from": {"id": 555, "is_bot": False, "first_name": "Ali", "username": "ali"},
+                "text": "/stats",
+            },
+        }
+    )
+    test_bot.process_new_updates([non_admin_stats])
+    assert "Admin access only" in sent_messages[-1][1]
+
+    # Admin runs /stats and /addcredits 555 4
+    admin_stats = bot_module.telebot.types.Update.de_json(
+        {
+            "update_id": 11,
+            "message": {
+                "message_id": 11,
+                "date": 1700000001,
+                "chat": {"id": 888888, "type": "private"},
+                "from": {"id": 888888, "is_bot": False, "first_name": "Sadek"},
+                "text": "/stats",
+            },
+        }
+    )
+    test_bot.process_new_updates([admin_stats])
+    assert "AITADZ Bot Statistics" in sent_messages[-1][1]
+
+    admin_give = bot_module.telebot.types.Update.de_json(
+        {
+            "update_id": 12,
+            "message": {
+                "message_id": 12,
+                "date": 1700000002,
+                "chat": {"id": 888888, "type": "private"},
+                "from": {"id": 888888, "is_bot": False, "first_name": "Sadek"},
+                "text": "/addcredits 555 4",
+            },
+        }
+    )
+    test_bot.process_new_updates([admin_give])
+    assert test_db.get_credits(555) == 5
+    test_db.close()
