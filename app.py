@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import hmac
 import logging
 import os
+import threading
+import time
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -36,9 +39,42 @@ logging.basicConfig(
 logger = logging.getLogger("aitadz.app")
 
 WEBHOOK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=int(os.environ.get("AITADZ_WEBHOOK_WORKERS", "4")),
+    max_workers=int(os.environ.get("AITADZ_WORKERS", os.environ.get("AITADZ_WEBHOOK_WORKERS", "4"))),
     thread_name_prefix="aitadz-webhook",
 )
+
+
+def resolve_webhook_base_url() -> str:
+    """Resolve public webhook base URL from WEBHOOK_BASE_URL, WEBHOOK_URL, or RENDER_EXTERNAL_URL."""
+    render_url = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip().strip('"').strip("'").rstrip("/")
+    manual_url = (
+        (os.environ.get("WEBHOOK_BASE_URL") or os.environ.get("WEBHOOK_URL") or "")
+        .strip()
+        .strip('"')
+        .strip("'")
+        .rstrip("/")
+    )
+    if manual_url and not manual_url.startswith("<"):
+        if manual_url.endswith("/webhook"):
+            manual_url = manual_url[: -len("/webhook")]
+        return manual_url
+    return render_url
+
+
+def resolve_webhook_secret(bot_instance: telebot.TeleBot = default_bot) -> str:
+    """Resolve webhook secret from env, or derive a deterministic token-based secret."""
+    explicit = (
+        (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or os.environ.get("WEBHOOK_SECRET") or "")
+        .strip()
+        .strip('"')
+        .strip("'")
+    )
+    if explicit:
+        return explicit
+    token = getattr(bot_instance, "token", "") or ""
+    if is_bot_token_configured() and token:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()[:48]
+    return ""
 
 
 def _process_update(bot_instance: telebot.TeleBot, update: telebot.types.Update) -> None:
@@ -61,7 +97,7 @@ def create_app(
     def _expected_secret() -> str:
         if webhook_secret is not None:
             return webhook_secret
-        return os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        return resolve_webhook_secret(active_bot)
 
     @flask_app.route("/", methods=["GET"])
     @flask_app.route("/health", methods=["GET"])
@@ -93,6 +129,43 @@ def create_app(
 
 app = create_app()
 
+_bootstrap_lock = threading.Lock()
+_bootstrapped = False
+
+
+def bootstrap_webhook() -> None:
+    """Register Telegram webhook in a background thread when running under Gunicorn."""
+    global _bootstrapped
+    with _bootstrap_lock:
+        if _bootstrapped:
+            return
+        _bootstrapped = True
+
+    base_url = resolve_webhook_base_url()
+    secret = resolve_webhook_secret(default_bot)
+    if not (is_bot_token_configured() and base_url and secret):
+        logger.info(
+            "Skipping automatic webhook registration (token_ok=%s, base_url=%r).",
+            is_bot_token_configured(),
+            base_url,
+        )
+        return
+
+    def _register() -> None:
+        time.sleep(0.5)
+        webhook_url = f"{base_url}/webhook"
+        try:
+            default_bot.set_webhook(
+                url=webhook_url,
+                secret_token=secret,
+                allowed_updates=["message", "callback_query"],
+            )
+            logger.info("Telegram webhook registered at %s", webhook_url)
+        except Exception as exc:
+            logger.warning("Automatic Telegram webhook registration failed: %s", exc)
+
+    threading.Thread(target=_register, name="aitadz-webhook-init", daemon=True).start()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AITADZ Primary ESL Telegram Bot Server")
@@ -116,6 +189,7 @@ def main() -> None:
             logger.warning("Could not remove existing webhook before polling: %s", exc)
         default_bot.infinity_polling(skip_pending=True)
     else:
+        bootstrap_webhook()
         port = int(os.environ.get("PORT", 3000))
         logger.info("Starting AITADZ Flask webhook server on 0.0.0.0:%s", port)
         app.run(host="0.0.0.0", port=port)
@@ -123,3 +197,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+elif os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"):
+    bootstrap_webhook()

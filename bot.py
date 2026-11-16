@@ -54,9 +54,27 @@ GENERATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 _DUMMY_TOKEN = "000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
+def _resolve_bot_token(explicit_token: Optional[str] = None) -> str:
+    """Resolve and sanitize TELEGRAM_BOT_TOKEN (or BOT_TOKEN) without crashing on import."""
+    raw = (
+        explicit_token
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
+        or os.environ.get("BOT_TOKEN")
+        or ""
+    )
+    cleaned = raw.strip().strip('"').strip("'")
+    if cleaned and ":" in cleaned and not any(ch.isspace() for ch in cleaned):
+        return cleaned
+    if cleaned:
+        logger.error(
+            "TELEGRAM_BOT_TOKEN appears malformed (expected '<id>:<secret>' with no spaces); "
+            "using inactive fallback token until fixed."
+        )
+    return _DUMMY_TOKEN
+
+
 def is_bot_token_configured() -> bool:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    return bool(token and token != _DUMMY_TOKEN)
+    return _resolve_bot_token() != _DUMMY_TOKEN
 
 
 def get_session_state(chat_id: int) -> Dict[str, Any]:
@@ -278,8 +296,8 @@ def create_bot(
     async_dispatch: bool = True,
 ) -> telebot.TeleBot:
     """Create and configure the TeleBot instance with all wizard handlers."""
-    resolved_token = (token or os.environ.get("TELEGRAM_BOT_TOKEN") or _DUMMY_TOKEN).strip()
-    bot_instance = telebot.TeleBot(resolved_token, threaded=False)
+    resolved_token = _resolve_bot_token(token)
+    bot_instance = telebot.TeleBot(resolved_token, threaded=False, validate_token=False)
     make_mcp = mcp_client_factory or CloudflareMCPClient
 
     def _safe_answer_cb(call: types.CallbackQuery, text: Optional[str] = None) -> None:

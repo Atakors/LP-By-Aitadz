@@ -564,3 +564,24 @@ def test_bot_wizard_full_handler_flow(monkeypatch):
     assert sent_docs[0][0] == chat_id
     assert sent_docs[0][1].startswith("AITADZ_5PS_Seq1_")
     assert sent_docs[0][2] == b"PK"
+
+
+def test_resilient_env_token_and_webhook_url_resolution(monkeypatch):
+    # Malformed token in env should fall back cleanly without crashing create_bot()
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bad-token-without-colon")
+    safe_bot = bot_module.create_bot()
+    assert safe_bot.token == bot_module._DUMMY_TOKEN
+
+    # Quotes / spaces around valid token are stripped cleanly
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", '  "123456:ABCDEF_valid"  ')
+    valid_bot = bot_module.create_bot()
+    assert valid_bot.token == "123456:ABCDEF_valid"
+
+    # Webhook base URL resolves from RENDER_EXTERNAL_URL and strips /webhook suffix
+    monkeypatch.delenv("WEBHOOK_BASE_URL", raising=False)
+    monkeypatch.delenv("WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://aitadz-lesson-bot.onrender.com/")
+    assert app_module.resolve_webhook_base_url() == "https://aitadz-lesson-bot.onrender.com"
+
+    monkeypatch.setenv("WEBHOOK_BASE_URL", '"https://custom.aitadz.pro/webhook/"')
+    assert app_module.resolve_webhook_base_url() == "https://custom.aitadz.pro"

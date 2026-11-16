@@ -24,8 +24,16 @@ import uuid
 from typing import Any, Dict, Optional
 
 import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+
+try:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    _HAS_MCP_SDK = True
+except ImportError:
+    ClientSession = None  # type: ignore[assignment]
+    streamablehttp_client = None  # type: ignore[assignment]
+    _HAS_MCP_SDK = False
 
 from didactic_rules import (
     build_system_prompt,
@@ -211,7 +219,9 @@ class CloudflareMCPClient:
         }
 
     async def _invoke_via_mcp_sdk(self, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Invoke the portal using the official MCP Streamable HTTP client session."""
+        """Invoke the portal using the official MCP Streamable HTTP client session if installed."""
+        if not _HAS_MCP_SDK or streamablehttp_client is None or ClientSession is None:
+            return None
         headers = self.get_auth_headers()
         async with streamablehttp_client(
             self.portal_url,

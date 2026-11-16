@@ -3,13 +3,13 @@ services:
     name: aitadz-lesson-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 app:app
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --preload
     healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.11"
+        value: "3.12.8"
       - key: PORT
         value: "3000"
       - key: TELEGRAM_BOT_TOKEN
