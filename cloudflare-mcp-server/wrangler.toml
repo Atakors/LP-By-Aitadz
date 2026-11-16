@@ -1,0 +1,17 @@
+name = "aitadz-mcp-server"
+main = "src/index.js"
+compatibility_date = "2025-02-01"
+
+[ai]
+binding = "AI"
+
+[vars]
+DEFAULT_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+SERVICE_NAME = "aitadz-cloudflare-mcp-server"
+
+# Secrets (configure via: npx wrangler secret put <NAME>):
+# - CF_ACCESS_CLIENT_ID      (Optional Worker-level check matching Cloudflare Access Service Token)
+# - CF_ACCESS_CLIENT_SECRET  (Optional Worker-level secret matching Cloudflare Access Service Token)
+# - LLM_BASE_URL             (Optional OpenAI-compatible AI Gateway / NIM / OpenAI base URL)
+# - LLM_API_KEY              (Optional Bearer API key when LLM_BASE_URL is configured)
+# - LLM_MODEL                (Optional model override when LLM_BASE_URL is configured)

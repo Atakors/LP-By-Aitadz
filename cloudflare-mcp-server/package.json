@@ -1,0 +1,12 @@
+{
+  "name": "aitadz-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker MCP Server for AITADZ Algerian Primary English Lesson Plan Assistant",
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "test": "node --test test/worker.test.mjs"
+  }
+}

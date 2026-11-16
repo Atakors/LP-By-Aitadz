@@ -1,0 +1,24 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Generated Word documents & temp working folders
+*.docx
+tmp/
+*.tmp
+*.log
+
+# Cloudflare Wrangler / Node.js local state & secrets
+.wrangler/
+node_modules/
+.dev.vars
