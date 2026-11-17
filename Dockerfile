@@ -20,4 +20,4 @@ USER aitadz
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-3000} --workers 1 --threads 4 --timeout 120 --preload"]
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-3000} --workers 1 --threads 4 --timeout 120"]

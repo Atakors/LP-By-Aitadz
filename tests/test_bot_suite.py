@@ -1067,3 +1067,43 @@ def test_bot_template_selector_preview_and_modern_generation(monkeypatch, tmp_pa
 
     bot_module._PREVIEW_FILE_IDS.clear()
     test_db.close()
+
+
+def test_webhook_registration_retries_on_502_bad_gateway():
+    err_502 = bot_module.telebot.apihelper.ApiTelegramException(
+        "setWebhook",
+        SimpleNamespace(status_code=502, reason="Bad Gateway", text="Bad Gateway"),
+        {"ok": False, "error_code": 502, "description": "Bad Gateway"},
+    )
+    fake_bot = MagicMock()
+    fake_bot.set_webhook.side_effect = [err_502, err_502, True]
+
+    ok = app_module.register_webhook_with_retry(
+        bot_instance=fake_bot,
+        base_url="https://aitadz-lesson-bot.onrender.com",
+        secret="webhook-secret-xyz",
+        initial_delay=0.0,
+        retry_delays=(0.01, 0.01, 0.01),
+        sleep_fn=lambda _: None,
+    )
+    assert ok is True
+    assert fake_bot.set_webhook.call_count == 3
+
+    err_401 = bot_module.telebot.apihelper.ApiTelegramException(
+        "setWebhook",
+        SimpleNamespace(status_code=401, reason="Unauthorized", text="Unauthorized"),
+        {"ok": False, "error_code": 401, "description": "Unauthorized"},
+    )
+    fake_bot_401 = MagicMock()
+    fake_bot_401.set_webhook.side_effect = err_401
+
+    ok_401 = app_module.register_webhook_with_retry(
+        bot_instance=fake_bot_401,
+        base_url="https://aitadz-lesson-bot.onrender.com",
+        secret="webhook-secret-xyz",
+        initial_delay=0.0,
+        retry_delays=(0.01, 0.01, 0.01),
+        sleep_fn=lambda _: None,
+    )
+    assert ok_401 is False
+    assert fake_bot_401.set_webhook.call_count == 1

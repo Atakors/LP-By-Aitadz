@@ -22,7 +22,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -91,6 +91,7 @@ def create_app(
 ) -> Flask:
     """Create and configure the Flask application for Render / Docker / UptimeRobot."""
     flask_app = Flask(__name__)
+    is_default_app = bot_instance is None
     active_bot = bot_instance or default_bot
     worker_pool = executor or WEBHOOK_EXECUTOR
 
@@ -102,6 +103,14 @@ def create_app(
     @flask_app.route("/", methods=["GET"])
     @flask_app.route("/health", methods=["GET"])
     def health_check():
+        if (
+            is_default_app
+            and (os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"))
+            and not _webhook_registered
+            and not _webhook_registering
+            and (time.monotonic() - _last_webhook_attempt_ts) >= 60.0
+        ):
+            bootstrap_webhook()
         return jsonify({"status": "ok", "service": "aitadz-lesson-bot"}), 200
 
     @flask_app.route("/webhook", methods=["POST"])
@@ -129,21 +138,92 @@ def create_app(
 
 app = create_app()
 
+DEFAULT_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0, 10.0, 20.0, 35.0, 60.0)
+
 _bootstrap_lock = threading.Lock()
-_bootstrapped = False
+_webhook_registered = False
+_webhook_registering = False
+_last_webhook_attempt_ts = 0.0
 
 
-def bootstrap_webhook() -> None:
+def _is_non_retryable_telegram_error(exc: Exception) -> bool:
+    """Return True for permanent Telegram 4xx client errors (400/401/404) where retrying is futile."""
+    return getattr(exc, "error_code", None) in (400, 401, 404)
+
+
+def register_webhook_with_retry(
+    bot_instance: telebot.TeleBot = default_bot,
+    base_url: Optional[str] = None,
+    secret: Optional[str] = None,
+    initial_delay: float = 2.0,
+    retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Register Telegram webhook with exponential-style backoff on transient 502/5xx/network errors."""
+    resolved_base = (
+        base_url if base_url is not None else resolve_webhook_base_url()
+    ).strip().rstrip("/")
+    resolved_secret = (
+        secret if secret is not None else resolve_webhook_secret(bot_instance)
+    ).strip()
+    token_ok = True if bot_instance is not default_bot else is_bot_token_configured()
+
+    if not (token_ok and resolved_base and resolved_secret):
+        logger.info(
+            "Skipping automatic webhook registration (token_ok=%s, base_url=%r).",
+            token_ok,
+            resolved_base,
+        )
+        return False
+
+    if initial_delay > 0:
+        sleep_fn(initial_delay)
+
+    webhook_url = f"{resolved_base}/webhook"
+    max_attempts = 1 + len(retry_delays)
+    for attempt in range(max_attempts):
+        try:
+            bot_instance.set_webhook(
+                url=webhook_url,
+                secret_token=resolved_secret,
+                allowed_updates=["message", "callback_query"],
+            )
+            logger.info("Telegram webhook registered at %s", webhook_url)
+            return True
+        except Exception as exc:
+            if _is_non_retryable_telegram_error(exc):
+                logger.warning(
+                    "Telegram webhook registration rejected (%s); not retrying.",
+                    exc,
+                )
+                return False
+            if attempt < len(retry_delays):
+                delay = retry_delays[attempt]
+                logger.warning(
+                    "Automatic Telegram webhook registration attempt %s/%s failed (%s); retrying in %.1fs.",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                sleep_fn(delay)
+            else:
+                logger.warning(
+                    "Automatic Telegram webhook registration failed after %s attempts: %s",
+                    max_attempts,
+                    exc,
+                )
+    return False
+
+
+def bootstrap_webhook(force: bool = False) -> None:
     """Register Telegram webhook in a background thread when running under Gunicorn."""
-    global _bootstrapped
-    with _bootstrap_lock:
-        if _bootstrapped:
-            return
-        _bootstrapped = True
-
+    global _webhook_registered, _webhook_registering, _last_webhook_attempt_ts
     base_url = resolve_webhook_base_url()
     secret = resolve_webhook_secret(default_bot)
     if not (is_bot_token_configured() and base_url and secret):
+        with _bootstrap_lock:
+            _last_webhook_attempt_ts = time.monotonic()
         logger.info(
             "Skipping automatic webhook registration (token_ok=%s, base_url=%r).",
             is_bot_token_configured(),
@@ -151,18 +231,26 @@ def bootstrap_webhook() -> None:
         )
         return
 
+    with _bootstrap_lock:
+        if (_webhook_registered and not force) or _webhook_registering:
+            return
+        _webhook_registering = True
+        _last_webhook_attempt_ts = time.monotonic()
+
     def _register() -> None:
-        time.sleep(0.5)
-        webhook_url = f"{base_url}/webhook"
+        global _webhook_registered, _webhook_registering, _last_webhook_attempt_ts
         try:
-            default_bot.set_webhook(
-                url=webhook_url,
-                secret_token=secret,
-                allowed_updates=["message", "callback_query"],
+            ok = register_webhook_with_retry(
+                default_bot,
+                base_url=base_url,
+                secret=secret,
             )
-            logger.info("Telegram webhook registered at %s", webhook_url)
-        except Exception as exc:
-            logger.warning("Automatic Telegram webhook registration failed: %s", exc)
+            with _bootstrap_lock:
+                _webhook_registered = bool(ok)
+                _last_webhook_attempt_ts = time.monotonic()
+        finally:
+            with _bootstrap_lock:
+                _webhook_registering = False
 
     threading.Thread(target=_register, name="aitadz-webhook-init", daemon=True).start()
 
