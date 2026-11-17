@@ -14,18 +14,25 @@ English teachers (3PS, 4PS, 5PS):
 
 from __future__ import annotations
 
+from collections import deque
 import concurrent.futures
+from datetime import datetime, timezone
 import html
 import io
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
-from typing import Any, Callable, Dict, Optional, Set
+import time
+from typing import Any, Callable, Dict, Optional, Sequence, Set
 
 import telebot
 from telebot import types
+
+telebot.apihelper.CONNECT_TIMEOUT = 15
+telebot.apihelper.READ_TIMEOUT = 45
 
 from database import Database
 from didactic_rules import (
@@ -57,12 +64,94 @@ _SESSION_LOCK = threading.Lock()
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
 _PREVIEW_CACHE_LOCK = threading.Lock()
 _PREVIEW_FILE_IDS: Dict[tuple[str, str], str] = {}
+_ERROR_LOCK = threading.Lock()
+RECENT_ERRORS: deque[str] = deque(maxlen=15)
 GENERATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.environ.get("AITADZ_WORKERS", "4")),
     thread_name_prefix="aitadz-gen",
 )
 
 _DUMMY_TOKEN = "000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+_TOKEN_URL_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def _sanitize_error_text(text: Any) -> str:
+    cleaned = _TOKEN_URL_RE.sub("bot<REDACTED>", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:240]
+
+
+def _record_recent_error(stage_tag: str, exc: Exception) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    summary = _sanitize_error_text(f"{type(exc).__name__}: {exc}")
+    entry = f"[{stamp}] ({stage_tag}) {summary}"
+    with _ERROR_LOCK:
+        RECENT_ERRORS.appendleft(entry)
+    return summary
+
+
+def _is_transient_telegram_error(exc: Exception) -> bool:
+    error_code = getattr(exc, "error_code", None)
+    status_code = getattr(getattr(exc, "result", None), "status_code", None)
+    if error_code in (429, 500, 502, 503, 504) or status_code in (429, 500, 502, 503, 504):
+        return True
+    if isinstance(exc, (OSError, TimeoutError, ConnectionError)):
+        return True
+    return "requests.exceptions" in (type(exc).__module__ or "")
+
+
+def _send_docx_with_retry(
+    bot_instance: telebot.TeleBot,
+    chat_id: int,
+    output_path: str,
+    filename: str,
+    caption: str,
+    reply_markup: Any,
+    retry_delays: Sequence[float] = (1.5, 3.0, 6.0),
+    sleep_fn: Optional[Callable[[float], None]] = None,
+) -> None:
+    wait_fn = sleep_fn or time.sleep
+    max_attempts = 1 + len(retry_delays)
+    parse_mode: Optional[str] = "HTML"
+    retried_plain = False
+    plain_caption = re.sub(r"<[^>]+>", "", html.unescape(caption))
+    attempt = 0
+
+    while attempt < max_attempts:
+        try:
+            with open(output_path, "rb") as doc_file:
+                bot_instance.send_document(
+                    chat_id=chat_id,
+                    document=doc_file,
+                    visible_file_name=filename,
+                    caption=caption if parse_mode == "HTML" else plain_caption,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+            return
+        except Exception as exc:
+            if (
+                not retried_plain
+                and getattr(exc, "error_code", None) == 400
+                and "can't parse entities" in str(exc).lower()
+            ):
+                logger.warning("Telegram rejected HTML caption; retrying send_document as plain text.")
+                retried_plain = True
+                parse_mode = None
+                continue
+            if _is_transient_telegram_error(exc) and attempt < len(retry_delays):
+                delay = retry_delays[attempt]
+                logger.warning(
+                    "send_document transient failure on attempt %s/%s (%s); retrying in %.1fs.",
+                    attempt + 1,
+                    max_attempts,
+                    _sanitize_error_text(exc),
+                    delay,
+                )
+                attempt += 1
+                wait_fn(delay)
+                continue
+            raise
 
 
 def _resolve_bot_token(explicit_token: Optional[str] = None) -> str:
@@ -295,6 +384,7 @@ def run_generation_pipeline(
     client = mcp_client or CloudflareMCPClient()
     tmp_dir: Optional[str] = None
     output_path: Optional[str] = None
+    stage_tag = "mcp_generate"
 
     try:
         plan_data = client.generate_lesson_plan_sync(
@@ -316,52 +406,58 @@ def run_generation_pipeline(
         resolved_tpl = normalize_template_id(template_id)
         tpl_meta = get_template_meta(resolved_tpl)
 
+        stage_tag = "docx_build"
         tmp_dir = tempfile.mkdtemp(prefix="aitadz_tg_")
         output_path = os.path.join(tmp_dir, filename)
         build_lesson_plan_docx(plan_data, output_path=output_path, template_id=resolved_tpl)
 
         credit_line = ""
         if db_instance is not None and user_id is not None:
-            db_instance.record_generation(
-                user_id=user_id,
-                grade=grade,
-                sequence_id=sequence_id,
-                section_id=section_id,
-                session_id=session_id,
-                topic=meta["topic"],
-                credits_used=0 if is_admin else (1 if credit_deducted else 0),
-                template_id=resolved_tpl,
-            )
-            if is_admin:
-                credit_line = "🎟️ <b>Credits:</b> Unlimited (Admin)\n"
-            else:
-                remaining = db_instance.get_credits(user_id)
-                credit_line = f"🎟️ <b>Remaining Credits:</b> {remaining}\n"
+            try:
+                db_instance.record_generation(
+                    user_id=user_id,
+                    grade=grade,
+                    sequence_id=sequence_id,
+                    section_id=section_id,
+                    session_id=session_id,
+                    topic=meta["topic"],
+                    credits_used=0 if is_admin else (1 if credit_deducted else 0),
+                    template_id=resolved_tpl,
+                )
+                if is_admin:
+                    credit_line = "🎟️ <b>Credits:</b> Unlimited (Admin)\n"
+                else:
+                    remaining = db_instance.get_credits(user_id)
+                    credit_line = f"🎟️ <b>Remaining Credits:</b> {remaining}\n"
+            except Exception as db_exc:
+                logger.warning("Failed to record generation stats for chat %s: %s", chat_id, db_exc)
 
         header = plan_data["header"]
         duration_str = header.get("duration", f"{meta.get('duration_minutes', 60)} mn")
+        topic_raw = str(meta.get("topic") or "").strip()
+        topic_display = (topic_raw[:137] + "...") if len(topic_raw) > 140 else topic_raw
         caption = (
             f"✅ <b>AITADZ Official Didactic Lesson Plan Ready!</b>\n\n"
             f"🎓 <b>Level:</b> {html.escape(header['level'])}\n"
             f"📘 <b>Sequence:</b> {html.escape(header['sequence'])}\n"
             f"📂 <b>Section:</b> {html.escape(header['section'])}\n"
             f"📝 <b>Session:</b> {html.escape(bp['title'])}\n"
-            f"🎯 <b>Topic Focus:</b> {html.escape(meta['topic'])}\n"
+            f"🎯 <b>Topic Focus:</b> {html.escape(topic_display)}\n"
             f"🎨 <b>Template:</b> {html.escape(tpl_meta['name'])}\n"
             f"⏱️ <b>Duration:</b> {html.escape(duration_str)} (A4 Print-Ready • Didactic Guide Compliant)\n"
             f"{credit_line}\n"
             f"<i>Generated by AITADZ Teacher Assistant (aitadz.pro)</i>"
         )
 
-        with open(output_path, "rb") as doc_file:
-            bot_instance.send_document(
-                chat_id=chat_id,
-                document=doc_file,
-                visible_file_name=filename,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=build_post_generation_keyboard(),
-            )
+        stage_tag = "telegram_send_document"
+        _send_docx_with_retry(
+            bot_instance=bot_instance,
+            chat_id=chat_id,
+            output_path=output_path,
+            filename=filename,
+            caption=caption,
+            reply_markup=build_post_generation_keyboard(),
+        )
 
         if status_message_id is not None:
             try:
@@ -372,23 +468,34 @@ def run_generation_pipeline(
         return filename
 
     except Exception as exc:
-        logger.exception("Failed generating lesson plan for chat %s: %s", chat_id, exc)
+        logger.exception("Failed generating lesson plan [%s] for chat %s: %s", stage_tag, chat_id, exc)
+        diag_summary = _record_recent_error(stage_tag, exc)
         if credit_deducted and not is_admin and db_instance is not None and user_id is not None:
             try:
                 db_instance.add_credits(user_id, 1, reason="refund_on_error")
             except Exception:
                 pass
-        err_text = (
+        base_err = (
             "⚠️ Sorry, something went wrong while generating your lesson plan. "
             "Your credit has been refunded. Please tap /start to try again."
             if credit_deducted and not is_admin
             else "⚠️ Sorry, something went wrong while generating your lesson plan. Please tap /start to try again."
         )
+        if is_admin:
+            err_text = (
+                f"{base_err}\n\n"
+                f"🔧 <b>Admin Diagnostic ({html.escape(stage_tag)}):</b> "
+                f"<code>{html.escape(diag_summary)}</code>"
+            )
+            err_kwargs: Dict[str, Any] = {"parse_mode": "HTML"}
+        else:
+            err_text = base_err
+            err_kwargs = {}
         try:
             if status_message_id is not None:
-                bot_instance.edit_message_text(err_text, chat_id, status_message_id)
+                bot_instance.edit_message_text(err_text, chat_id, status_message_id, **err_kwargs)
             else:
-                bot_instance.send_message(chat_id, err_text)
+                bot_instance.send_message(chat_id, err_text, **err_kwargs)
         except Exception:
             pass
         return None
@@ -558,14 +665,24 @@ def create_bot(
                     _PREVIEW_FILE_IDS.pop(cache_key, None)
 
         img_path = get_preview_image_path(clean_kind)
-        with open(img_path, "rb") as photo_file:
-            sent = bot_instance.send_photo(
-                chat_id,
-                photo=photo_file,
-                caption=captions[clean_kind],
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
+        sent = None
+        retry_delays = (1.5, 3.0)
+        for attempt in range(1 + len(retry_delays)):
+            try:
+                with open(img_path, "rb") as photo_file:
+                    sent = bot_instance.send_photo(
+                        chat_id,
+                        photo=photo_file,
+                        caption=captions[clean_kind],
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                break
+            except Exception as exc:
+                if _is_transient_telegram_error(exc) and attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
+                    continue
+                raise
         photos = getattr(sent, "photo", None)
         if photos:
             try:
@@ -682,7 +799,7 @@ def create_bot(
             else f"🎟️ <b>Available Credits:</b> {user_row['credits']}"
         )
         admin_hint = (
-            "\n🛠️ <b>Admin Commands:</b> /templates • /stats • /users • /addcredits • /export_users"
+            "\n🛠️ <b>Admin Commands:</b> /templates • /stats • /errors • /users • /addcredits • /export_users"
             if admin_flag
             else "\n💡 Check /templates, /credits or /myid anytime."
         )
@@ -757,6 +874,24 @@ def create_bot(
             f"📚 <b>By Grade:</b> 3PS: {by_g['3PS']} | 4PS: {by_g['4PS']} | 5PS: {by_g['5PS']}\n"
             f"🎨 <b>By Template:</b> Classic: {by_t.get('classic', 0)} | Executive: {by_t.get('modern', 0)}\n\n"
             f"🏆 <b>Top Users:</b>\n{top_block}",
+            parse_mode="HTML",
+        )
+
+    @bot_instance.message_handler(commands=["errors", "diag"])
+    def handle_errors_command(message: types.Message) -> None:
+        _, admin_flag = _sync_user(message.from_user, message.chat.id)
+        if not admin_flag:
+            bot_instance.send_message(message.chat.id, "⛔ Admin access only.")
+            return
+        with _ERROR_LOCK:
+            entries = list(RECENT_ERRORS)
+        if not entries:
+            bot_instance.send_message(message.chat.id, "✅ No recent errors recorded.")
+            return
+        formatted = "\n".join(f"• <code>{html.escape(item)}</code>" for item in entries)
+        bot_instance.send_message(
+            message.chat.id,
+            f"🩺 <b>Recent Bot Errors ({len(entries)}):</b>\n\n{formatted}",
             parse_mode="HTML",
         )
 

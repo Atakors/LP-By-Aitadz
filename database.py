@@ -51,13 +51,34 @@ class Database:
             os.makedirs(parent, exist_ok=True)
 
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._pid = os.getpid()
+        self._raw_conn: Optional[sqlite3.Connection] = None
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(after_in_child=self._reset_after_fork)
         self._init_schema()
+
+    def _reset_after_fork(self) -> None:
+        """Reset lock and drop parent SQLite handle without closing it in forked workers."""
+        self._lock = threading.Lock()
+        self._raw_conn = None
+        self._pid = os.getpid()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Return a process-local SQLite connection with busy timeout (safe after fork)."""
+        cur_pid = os.getpid()
+        if self._raw_conn is None or self._pid != cur_pid:
+            conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=30000;")
+            conn.execute("PRAGMA journal_mode=WAL;")
+            self._raw_conn = conn
+            self._pid = cur_pid
+        return self._raw_conn
 
     def _init_schema(self) -> None:
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute(
                 """
@@ -124,11 +145,13 @@ class Database:
                 cur.execute(
                     "ALTER TABLE generations ADD COLUMN template_id TEXT NOT NULL DEFAULT 'classic';"
                 )
-            self._conn.commit()
+            conn.commit()
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._raw_conn is not None:
+                self._raw_conn.close()
+                self._raw_conn = None
 
     # -----------------------------------------------------------------------
     # USER MANAGEMENT
@@ -152,7 +175,8 @@ class Database:
         lang = (language_code or "").strip()
 
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             existing = cur.execute(
                 "SELECT * FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
@@ -213,7 +237,7 @@ class Database:
                     ),
                 )
 
-            self._conn.commit()
+            conn.commit()
             row = cur.execute(
                 "SELECT * FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
@@ -221,7 +245,7 @@ class Database:
 
     def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
-            row = self._conn.execute(
+            row = self._get_conn().execute(
                 "SELECT * FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
             return dict(row) if row else None
@@ -231,22 +255,23 @@ class Database:
         if not clean:
             return None
         with self._lock:
-            row = self._conn.execute(
+            row = self._get_conn().execute(
                 "SELECT * FROM users WHERE LOWER(username) = ?", (clean,)
             ).fetchone()
             return dict(row) if row else None
 
     def set_admin(self, user_id: int, is_admin: bool = True) -> None:
         with self._lock:
-            self._conn.execute(
+            conn = self._get_conn()
+            conn.execute(
                 "UPDATE users SET is_admin = ? WHERE user_id = ?",
                 (1 if is_admin else 0, int(user_id)),
             )
-            self._conn.commit()
+            conn.commit()
 
     def get_preferred_template(self, user_id: int) -> str:
         with self._lock:
-            row = self._conn.execute(
+            row = self._get_conn().execute(
                 "SELECT preferred_template FROM users WHERE user_id = ?",
                 (int(user_id),),
             ).fetchone()
@@ -256,7 +281,8 @@ class Database:
         resolved = normalize_template_id(template_id)
         now = _utc_now_iso()
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             cur.execute(
                 "UPDATE users SET preferred_template = ?, last_active_at = ? WHERE user_id = ?",
                 (resolved, now, int(user_id)),
@@ -278,7 +304,7 @@ class Database:
                         now,
                     ),
                 )
-            self._conn.commit()
+            conn.commit()
             return resolved
 
     # -----------------------------------------------------------------------
@@ -287,7 +313,7 @@ class Database:
 
     def get_credits(self, user_id: int) -> int:
         with self._lock:
-            row = self._conn.execute(
+            row = self._get_conn().execute(
                 "SELECT credits FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
             return int(row["credits"]) if row else 0
@@ -305,7 +331,8 @@ class Database:
         """
         now = _utc_now_iso()
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             row = cur.execute(
                 "SELECT credits, is_admin FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
@@ -332,7 +359,7 @@ class Database:
                 """,
                 (int(user_id), -amount, new_balance, reason, now),
             )
-            self._conn.commit()
+            conn.commit()
             return True, new_balance
 
     def add_credits(
@@ -345,7 +372,8 @@ class Database:
         """Adjust a user's credit balance (clamped at >= 0) and record audit trail."""
         now = _utc_now_iso()
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             row = cur.execute(
                 "SELECT credits FROM users WHERE user_id = ?", (int(user_id),)
             ).fetchone()
@@ -377,7 +405,7 @@ class Database:
                 """,
                 (int(user_id), int(amount), new_balance, reason, admin_id, now),
             )
-            self._conn.commit()
+            conn.commit()
             return new_balance
 
     # -----------------------------------------------------------------------
@@ -398,7 +426,8 @@ class Database:
         now = _utc_now_iso()
         resolved_tpl = normalize_template_id(template_id)
         with self._lock:
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             cur.execute(
                 """
                 INSERT INTO generations (
@@ -427,12 +456,12 @@ class Database:
                 """,
                 (now, int(user_id)),
             )
-            self._conn.commit()
+            conn.commit()
 
     def get_stats(self) -> Dict[str, Any]:
         today = _utc_today_prefix()
         with self._lock:
-            cur = self._conn.cursor()
+            cur = self._get_conn().cursor()
             total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             active_today = cur.execute(
                 "SELECT COUNT(*) FROM users WHERE last_active_at LIKE ?", (f"{today}%",)
@@ -500,7 +529,7 @@ class Database:
 
     def list_users(self, limit: int = 30, offset: int = 0) -> List[Dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT user_id, username, first_name, last_name, credits,
                        total_generated, is_admin, created_at, last_active_at

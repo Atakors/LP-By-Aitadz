@@ -2123,10 +2123,29 @@ def ensure_objective_formula(objective: str, fallback_action: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
     if not cleaned_body:
-        cleaned_body = fallback_action
-    if cleaned_body[0].isupper() and not cleaned_body.startswith(("I ",)):
+        cleaned_body = fallback_action or "participate actively in session tasks."
+    if cleaned_body and cleaned_body[0].isupper() and not cleaned_body.startswith(("I ",)):
         cleaned_body = cleaned_body[0].lower() + cleaned_body[1:]
     return f"{OBJECTIVE_FORMULA_PREFIX} {cleaned_body}"
+
+
+def _coerce_text_field(val: Any) -> str:
+    """Safely convert string, list, or dict LLM outputs into clean newline-delimited text."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val.strip()
+    if isinstance(val, list):
+        parts: List[str] = []
+        for item in val:
+            coerced = _coerce_text_field(item)
+            if coerced:
+                parts.append(coerced)
+        return "\n".join(parts)
+    if isinstance(val, dict):
+        parts = [_coerce_text_field(v) for v in val.values()]
+        return "\n".join(p for p in parts if p)
+    return str(val).strip()
 
 
 def _parse_minutes(time_value: Any, default_minutes: int) -> int:
@@ -2179,13 +2198,13 @@ def _reconcile_stage_timings(
     for idx, st in enumerate(stages):
         mins = minutes_list[idx]
         bp_st = blueprint_stages[idx] if idx < len(blueprint_stages) else blueprint_stages[-1]
-        stage_name = str(st.get("stage") or bp_st["stage"]).strip()
-        proc_raw = str(st.get("procedure") or st.get("procedure_tasks") or bp_st["procedure"]).strip()
+        stage_name = _coerce_text_field(st.get("stage")) or bp_st["stage"]
+        raw_proc = st.get("procedure") if st.get("procedure") is not None else st.get("procedure_tasks")
+        proc_raw = _coerce_text_field(raw_proc) or bp_st["procedure"]
         proc_clean = sanitize_non_monetary_gamification(scrub_learner_meta_terms(proc_raw))
-        interaction = str(st.get("interaction") or bp_st["interaction"]).strip()
-        comp_mat = sanitize_non_monetary_gamification(
-            str(st.get("competency_materials") or bp_st["competency_materials"]).strip()
-        )
+        interaction = _coerce_text_field(st.get("interaction")) or bp_st["interaction"]
+        comp_raw = _coerce_text_field(st.get("competency_materials")) or bp_st["competency_materials"]
+        comp_mat = sanitize_non_monetary_gamification(comp_raw)
         normalized.append(
             {
                 "minutes": mins,

@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import logging
 import os
+import sys
 import threading
 import time
 from typing import Callable, Optional, Sequence
@@ -283,7 +284,23 @@ def main() -> None:
         app.run(host="0.0.0.0", port=port)
 
 
+def _reset_webhook_state_after_fork() -> None:
+    """Reinitialize locks and webhook registration in forked Gunicorn workers (--preload)."""
+    global _bootstrap_lock, _webhook_registered, _webhook_registering, _last_webhook_attempt_ts
+    _bootstrap_lock = threading.Lock()
+    _webhook_registered = False
+    _webhook_registering = False
+    _last_webhook_attempt_ts = 0.0
+    if os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"):
+        bootstrap_webhook()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_webhook_state_after_fork)
+
+
 if __name__ == "__main__":
     main()
 elif os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"):
-    bootstrap_webhook()
+    if "--preload" not in " ".join(sys.argv):
+        bootstrap_webhook()

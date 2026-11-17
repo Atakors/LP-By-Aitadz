@@ -356,6 +356,22 @@ def generate_clean_filename(
 # ---------------------------------------------------------------------------
 
 
+_XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_xml_data(value: Any) -> Any:
+    """Strip XML-illegal ASCII control characters so python-docx/lxml never raises ValueError."""
+    if isinstance(value, str):
+        return _XML_ILLEGAL_RE.sub("", value)
+    if isinstance(value, dict):
+        return {k: _sanitize_xml_data(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_xml_data(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_xml_data(v) for v in value)
+    return value
+
+
 def build_classic_lesson_plan_docx(
     plan_data: Dict[str, Any],
     output_path: Optional[str] = None,
@@ -367,6 +383,7 @@ def build_classic_lesson_plan_docx(
 
     Returns the path to the generated .docx file.
     """
+    plan_data = _sanitize_xml_data(plan_data)
     meta = plan_data.get("meta", {})
     header = plan_data.get("header", {})
     stages: List[Dict[str, Any]] = plan_data.get("stages", [])
@@ -1115,6 +1132,7 @@ def build_modern_lesson_plan_docx(
     Generate the Executive Standard (4Cs & VARK) A4 .docx lesson plan matching
     the attached Primary School Lesson Plan template layout.
     """
+    plan_data = _sanitize_xml_data(plan_data)
     meta = plan_data.get("meta", {})
     header = plan_data.get("header", {})
     stages: List[Dict[str, Any]] = plan_data.get("stages", [])

@@ -328,14 +328,28 @@ class CloudflareMCPClient:
                 "CLOUDFLARE_MCP_PORTAL_URL is not configured; using local Didactic Guide synthesizer."
             )
 
-        return validate_and_normalize_lesson_plan(
-            raw_plan,
-            grade=g,
-            sequence_id=sequence_id,
-            section_id=section_id,
-            session_id=session_id,
-            topic=topic,
-        )
+        try:
+            return validate_and_normalize_lesson_plan(
+                raw_plan,
+                grade=g,
+                sequence_id=sequence_id,
+                section_id=section_id,
+                session_id=session_id,
+                topic=topic,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Malformed MCP payload during normalization (%s); falling back to Didactic Guide synthesizer.",
+                exc,
+            )
+            return validate_and_normalize_lesson_plan(
+                None,
+                grade=g,
+                sequence_id=sequence_id,
+                section_id=section_id,
+                session_id=session_id,
+                topic=topic,
+            )
 
     def generate_lesson_plan_sync(
         self,

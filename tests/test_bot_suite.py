@@ -1107,3 +1107,130 @@ def test_webhook_registration_retries_on_502_bad_gateway():
     )
     assert ok_401 is False
     assert fake_bot_401.set_webhook.call_count == 1
+
+
+def test_generation_pipeline_retries_send_document_on_502_and_preserves_bytes(monkeypatch):
+    monkeypatch.setattr(bot_module.time, "sleep", lambda _: None)
+    bot_module.RECENT_ERRORS.clear()
+
+    err_502 = bot_module.telebot.apihelper.ApiTelegramException(
+        "sendDocument",
+        SimpleNamespace(status_code=502, reason="Bad Gateway", text="Bad Gateway"),
+        {"ok": False, "error_code": 502, "description": "Bad Gateway"},
+    )
+
+    attempts = []
+    fake_bot = MagicMock()
+
+    def flaky_send_document(chat_id, document, visible_file_name=None, **kwargs):
+        data = document.read()
+        attempts.append((chat_id, visible_file_name, data))
+        if len(attempts) < 3:
+            raise err_502
+        return SimpleNamespace(message_id=99)
+
+    fake_bot.send_document.side_effect = flaky_send_document
+
+    offline_mcp = CloudflareMCPClient(portal_url="", cf_client_id="", cf_client_secret="")
+    returned = bot_module.run_generation_pipeline(
+        bot_instance=fake_bot,
+        chat_id=123456,
+        status_message_id=42,
+        grade="4PS",
+        sequence_id="4ps-seq-2",
+        section_id="4ps-s2-1",
+        session_id="4ps-read-enjoy",
+        topic="School Library",
+        mcp_client=offline_mcp,
+    )
+    assert returned is not None
+    assert fake_bot.send_document.call_count == 3
+    assert attempts[-1][2][:2] == b"PK"
+    assert len(attempts[-1][2]) > 1000
+
+    # When retries exhaust for an admin, sanitized Admin Diagnostic is reported
+    fake_bot_fail = MagicMock()
+    fake_bot_fail.send_document.side_effect = err_502
+    res_fail = bot_module.run_generation_pipeline(
+        bot_instance=fake_bot_fail,
+        chat_id=123456,
+        status_message_id=43,
+        grade="4PS",
+        sequence_id="4ps-seq-2",
+        section_id="4ps-s2-1",
+        session_id="4ps-read-enjoy",
+        topic="School Library",
+        mcp_client=offline_mcp,
+        is_admin=True,
+    )
+    assert res_fail is None
+    assert fake_bot_fail.edit_message_text.called
+    diag_msg = fake_bot_fail.edit_message_text.call_args[0][0]
+    assert "Admin Diagnostic (telegram_send_document)" in diag_msg
+    assert "502" in diag_msg
+    assert any("telegram_send_document" in entry for entry in bot_module.RECENT_ERRORS)
+    bot_module.RECENT_ERRORS.clear()
+
+
+def test_docx_builder_strips_xml_control_chars_and_normalizer_accepts_list_procedures(tmp_path: Path):
+    raw_mcp_payload = {
+        "header": {
+            "session_objectives": "Learners will be able to name jobs\x00 in town.",
+        },
+        "stages": [
+            {
+                "stage": "Stage 1: Warm-up",
+                "minutes": 5,
+                "procedure": ["Activity 1 (Song):\x0b Sing job song.", {"task": "T points; Ls echo."}],
+                "interaction": ["T-Ls"],
+                "competency_materials": ["Flashcards\x1f"],
+            },
+            {
+                "stage": "Stage 2: Install Resources",
+                "minutes": 15,
+                "procedure": [
+                    "Activity 1 (Context): Present doctor & nurse.",
+                    {"line": "Activity 2 (Drill): Choral & pair practice."},
+                ],
+                "interaction": "T-Ls / Pair",
+                "competency_materials": "Realia\x0c",
+            },
+            {
+                "stage": "Stage 3: Practice & Production",
+                "minutes": 20,
+                "procedure": "Activity 1 (Role-play): Pair Q&A.",
+                "interaction": "Pair",
+                "competency_materials": "Slate",
+            },
+            {
+                "stage": "Stage 4: Exit Ticket",
+                "minutes": 5,
+                "procedure": "Activity 1 (Check): Ticket to Leave.",
+                "interaction": "Individual",
+                "competency_materials": "Stickers",
+            },
+        ],
+        "exit_ticket": "Smile & say one job\x07",
+        "whiteboard_layout": {
+            "left_panel": "Jobs\x00 & Workplaces",
+            "center_panel": "He is a doctor.\x0b",
+            "right_panel": "Team A * * *\x1f",
+        },
+    }
+
+    plan = didactic_rules.validate_and_normalize_lesson_plan(
+        raw_mcp_payload,
+        grade="5PS",
+        sequence_id="5ps-seq-1",
+        section_id="5ps-s1-1",
+        session_id="5ps-listen-interact",
+        topic="Jobs\x0c & Hobbies\x07",
+    )
+    assert "Activity 1 (Context)" in plan["stages"][1]["procedure"]
+    assert "Activity 2 (Drill)" in plan["stages"][1]["procedure"]
+
+    for tpl_id in ("classic", "modern"):
+        out = tmp_path / f"ctrl_{tpl_id}.docx"
+        saved = docx_builder.build_lesson_plan_docx(plan, output_path=str(out), template_id=tpl_id)
+        doc = Document(saved)
+        assert len(doc.tables) == 6
