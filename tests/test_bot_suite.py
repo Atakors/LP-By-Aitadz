@@ -695,3 +695,44 @@ def test_admin_stats_and_credit_enforcement_in_bot(monkeypatch, tmp_path: Path):
     test_bot.process_new_updates([admin_give])
     assert test_db.get_credits(555) == 5
     test_db.close()
+
+
+def test_install_resources_stages_have_detailed_activities(tmp_path: Path):
+    test_cases = [
+        ("3PS", "3ps-seq-2", "3ps-s2-1", "3ps-listen-repeat", "School Bag & Pen"),
+        ("3PS", "3ps-seq-4", "3ps-s4-1", "3ps-read-write", "My Toys"),
+        ("4PS", "4ps-seq-2", "4ps-s2-1", "4ps-read-enjoy", "School Facilities"),
+        ("4PS", "4ps-seq-4", "4ps-s4-2", "4ps-read-write", "Health Advice"),
+        ("5PS", "5ps-seq-1", "5ps-s1-1", "5ps-read-understand", "Doctor & Teacher"),
+        ("5PS", "5ps-seq-3", "5ps-s3-1", "5ps-learn-to-write", "Summer Holidays"),
+    ]
+
+    for grade, seq_id, sec_id, ses_id, topic in test_cases:
+        sys_p, usr_p = didactic_rules.build_system_prompt(grade, seq_id, sec_id, ses_id, topic)
+        assert "INSTALL RESOURCES & ACTIVITY DEPTH REQUIREMENTS" in sys_p
+        assert "Activity 1" in sys_p
+        assert "WITH 2-3 DETAILED ACTIVITIES IN EACH INSTALL RESOURCES STAGE" in usr_p
+
+        plan = didactic_rules.build_default_lesson_plan(grade, seq_id, sec_id, ses_id, topic)
+        install_stages = [
+            s for s in plan["stages"]
+            if any(k in s["stage"].lower() for k in ("install resources", "reading", "write", "pre-write", "stage 2", "stage 3"))
+        ]
+        assert install_stages, f"No install/core stages found for {grade} {ses_id}"
+        for st in install_stages:
+            proc = st["procedure"]
+            assert "Activity 1" in proc, f"Missing Activity 1 in {grade} {ses_id} {st['stage']}"
+            assert "Activity 2" in proc, f"Missing Activity 2 in {grade} {ses_id} {st['stage']}"
+            assert len(proc.splitlines()) >= 3
+            proc_lower = proc.lower()
+            for banned_meta in ("skim", "scan", "gist", "prediction"):
+                assert banned_meta not in proc_lower, f"Meta-term {banned_meta} leaked in {grade} {ses_id}"
+            for banned_money in ("money", "cash", "coin", "token", "dollar", "dinar"):
+                assert banned_money not in proc_lower, f"Monetary term {banned_money} leaked in {grade} {ses_id}"
+
+        out_path = tmp_path / f"{grade}_{ses_id}.docx"
+        saved = docx_builder.build_lesson_plan_docx(plan, output_path=str(out_path))
+        doc = Document(saved)
+        assert len(doc.tables) == 6
+        proc_cells = [row.cells[2].text for row in doc.tables[2].rows[1:-1]]
+        assert any("Activity 1" in txt and "Activity 2" in txt for txt in proc_cells)

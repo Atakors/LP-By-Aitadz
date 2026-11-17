@@ -117,6 +117,7 @@ test("tools/call generate_lesson_plan invokes Workers AI, scrubs meta/monetary t
         aiCalls += 1;
         assert.equal(model, TEST_ENV.DEFAULT_AI_MODEL);
         assert.equal(input.messages.length, 2);
+        assert.equal(input.max_tokens, 4096);
         return {
           response:
             "```json\n" +
@@ -214,4 +215,43 @@ test("tools/call generate_lesson_plan invokes Workers AI, scrubs meta/monetary t
     plan5.stages.reduce((acc, s) => acc + s.minutes, 0),
     45
   );
+});
+
+test("tools/call generate_lesson_plan produces rich multi-activity fallback when AI binding is absent", async () => {
+  const authHeaders = {
+    "CF-Access-Client-Id": TEST_ENV.CF_ACCESS_CLIENT_ID,
+    "CF-Access-Client-Secret": TEST_ENV.CF_ACCESS_CLIENT_SECRET,
+  };
+
+  const res = await worker.fetch(
+    makeMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: "fallback-4ps",
+        method: "tools/call",
+        params: {
+          name: "generate_lesson_plan",
+          arguments: {
+            grade: "4PS",
+            sequence: "Sequence 2: School",
+            section: "Section 1: Facilities",
+            session: "Session 2: I Read & Discover",
+            topic: "Library & Canteen",
+          },
+        },
+      },
+      authHeaders
+    ),
+    TEST_ENV
+  );
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const plan = body.result.structuredContent;
+  assert.equal(plan.header.duration, "60 mn");
+  const installStages = plan.stages.filter((s) => s.stage.includes("Install Resources"));
+  assert.ok(installStages.length >= 2);
+  for (const st of installStages) {
+    assert.ok(st.procedure.includes("Activity 1"), "Missing Activity 1 in fallback stage");
+    assert.ok(st.procedure.includes("Activity 2"), "Missing Activity 2 in fallback stage");
+  }
 });

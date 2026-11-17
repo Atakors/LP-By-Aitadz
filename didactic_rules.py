@@ -2199,6 +2199,415 @@ def _reconcile_stage_timings(
     return normalized
 
 
+def _extract_vocab_items(sec: Dict[str, Any], clean_topic: str) -> List[str]:
+    """Flatten comma-separated vocabulary lists into individual target lexical items."""
+    items: List[str] = []
+    for entry in sec.get("key_vocabulary", []):
+        for part in str(entry).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in items:
+                items.append(cleaned)
+    if clean_topic and clean_topic not in items:
+        items.insert(0, clean_topic)
+    return items[:8] or [clean_topic or "target vocabulary"]
+
+
+def _build_listening_script(
+    grade: str,
+    sec: Dict[str, Any],
+    clean_topic: str,
+    items: List[str],
+) -> str:
+    w1 = items[0]
+    w2 = items[1] if len(items) > 1 else items[0]
+    w3 = items[2] if len(items) > 2 else w1
+    if grade == "3PS":
+        return (
+            f'Amine: "Hello, Lina! Look, {w1}!" | '
+            f'Lina: "Hi, Amine! Is it {w2}?" | '
+            f'Amine: "Yes! It is {w2} and {w3}." | '
+            f'Lina: "Great! Let\'s say {w1}, {w2}, {w3}!"'
+        )
+    if grade == "4PS":
+        return (
+            f'Meriem: "Hello, Yacine! Welcome! Tell me about {clean_topic}." | '
+            f'Yacine: "Look! Here we have {w1} and {w2}." | '
+            f'Meriem: "Nice! Where is {w3}?" | '
+            f'Yacine: "It is right here next to {w1}!"'
+        )
+    return (
+        f'Amine: "Hi, Meriem! Today we are talking about {clean_topic}." | '
+        f'Meriem: "Really? I know {w1} and {w2}!" | '
+        f'Amine: "What about {w3}? Do you like it?" | '
+        f'Meriem: "Yes, I do! It is very interesting."'
+    )
+
+
+def _build_reading_passage(
+    grade: str,
+    sec: Dict[str, Any],
+    clean_topic: str,
+    items: List[str],
+) -> str:
+    w1 = items[0]
+    w2 = items[1] if len(items) > 1 else items[0]
+    w3 = items[2] if len(items) > 2 else w2
+    w4 = items[3] if len(items) > 3 else w1
+    if grade == "3PS":
+        return (
+            f"Hello! I am Amine. This is {clean_topic}. "
+            f"I see {w1} and {w2}. Look at {w3}. I like {w1}!"
+        )
+    if grade == "4PS":
+        return (
+            f"Hello! My name is Lina. I live in Algeria. Today our class talks about {clean_topic}. "
+            f"We see {w1}, {w2}, and {w3}. My friend Amine likes {w4} very much."
+        )
+    target_words = int(sec.get("reading_word_target", 30) or 30)
+    base = (
+        f"Hello! I am Yacine from Blida. Today I am sharing notes about {clean_topic}. "
+        f"Look at {w1}, {w2}, and {w3}. My friend Lina enjoys {w4} at the weekend."
+    )
+    if target_words >= 35:
+        base += f" Together we ask and answer questions about {clean_topic} every day."
+    return base
+
+
+def _build_rich_stage_procedure(
+    grade: str,
+    seq: Dict[str, Any],
+    sec: Dict[str, Any],
+    bp: Dict[str, Any],
+    stage_idx: int,
+    stage_spec: Dict[str, Any],
+    clean_topic: str,
+) -> str:
+    """
+    Generate detailed, classroom-ready, multi-activity procedure text for every stage,
+    with particular depth in 'Install Resources' stages (numbered activities, scripts,
+    texts, forms, drills, answer keys, and T:/Ls: micro-interactions).
+    """
+    stage_name = stage_spec["stage"]
+    stage_lower = stage_name.lower()
+    bp_id = bp["id"]
+    items = _extract_vocab_items(sec, clean_topic)
+    w1 = items[0]
+    w2 = items[1] if len(items) > 1 else w1
+    w3 = items[2] if len(items) > 2 else w2
+    w4 = items[3] if len(items) > 3 else w1
+    vocab_preview = ", ".join(items[:6])
+    grammar_preview = "; ".join(sec.get("implicit_grammar", []))
+    phonics_target = sec.get("phonics_target", "target sounds")
+    script = _build_listening_script(grade, sec, clean_topic, items)
+    passage = _build_reading_passage(grade, sec, clean_topic, items)
+
+    # 1. EXIT TICKET / FINAL FEEDBACK
+    if "exit ticket" in stage_lower:
+        return (
+            f"Activity 1 (Ticket to Leave Check): Show 3 quick flashcards ({w1}, {w2}, {w3}) at the door/desks.\n"
+            f'T: "Before we finish, name one word or phrase you learnt today and show your confidence card!"\n'
+            f'Ls: Each pupil produces one target item/chunk for "{clean_topic}" and holds up a green/amber/red smiley card.\n'
+            f"Activity 2 (Positive Closure): Award final Gold Stars and Stickers on the Team Chart for effort."
+        )
+
+    # 2. WARMER STAGES (Stage 1 of most sessions)
+    if "i sing and have fun" in stage_lower:
+        return (
+            f"Activity 1 (Visual Song Introduction): Pin flashcards ({vocab_preview}) on the left board.\n"
+            f"Activity 2 (Active Listening & TPR): Play/sing the '{seq['title']}' song twice. "
+            f"Learners listen for rhythm and clap when they hear {w1} or {w2}.\n"
+            f"Activity 3 (Whole-Class Sing-Along): Class sings together with mimes while teacher circulates to check pronunciation.\n"
+            f'T: "Great rhythm, Team A and Team B! You earn 1 Gold Star each!"'
+        )
+    if "(warmer)" in stage_lower or stage_lower.startswith("stage 1: warm-up"):
+        return (
+            f"Activity 1 (Diagnostic Flashcard Game — 'Quick Flash'): Hold up 4 cards ({w1}, {w2}, {w3}, {w4}) for 2 seconds each.\n"
+            f'T: "Look closely! What is this? Sound it out together!"\n'
+            f'Ls: Name each card chorally and clap syllables/target sounds ({phonics_target}).\n'
+            f"Activity 2 (Star Hook): Award Team Points on the right board to activate prior knowledge for '{clean_topic}'."
+        )
+
+    # 3. 3PS & 4PS SESSION 1 — I LISTEN & REPEAT
+    if "listen-repeat" in bp_id:
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Visual Context — STRICTLY NO WRITTEN TEXT): Introduce '{clean_topic}' using flashcards, realia, and mimes only.\n"
+                f"Activity 2 (Listening Script — 2 Clear Passes): Read/play the dialogue with expressive gestures:\n"
+                f"Listening Script: {script}\n"
+                f"Activity 3 (Oral Meaning Check): Ask 3 short yes/no and wh- questions using visuals:\n"
+                f'T: "Show me {w1}! Is it {w2}? Point to {w3}!" | Ls: Point, mime, and reply orally ("Yes!" / "No!").'
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Choral -> Group -> Individual Drilling): Model '{w1}', '{w2}', '{w3}' in short chunks ({grammar_preview}). "
+                f"Class repeats chorally, by rows, then individually with puppets.\n"
+                f"Activity 2 (VC/CVC Phonemic Awareness — Oral Only): Say 4 target words slowly; learners isolate initial sound, "
+                f"tap fingers to segment sounds, and clap hands to blend them back together (no sight words).\n"
+                f"Activity 3 (Echo Star Challenge): Teacher whispers or mimes a chunk; teams echo accurately to earn Gold Stars & Explorer Badges."
+            )
+
+    # 4. 3PS & 4PS SESSION 2 — I READ & DISCOVER
+    if "read-discover" in bp_id and grade in ("3PS", "4PS"):
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Left-to-Right Finger Tracking & Phonics): Display word cards ({w1}, {w2}, {w3}) and track left-to-right "
+                f"focusing strictly on letter sounds ({phonics_target}), NOT letter names and NO sight words.\n"
+                f"Activity 2 (Segmentation & Blending Drill): Model breaking target words sound-by-sound on board, then blend aloud with pupils.\n"
+                f"Activity 3 (Short Text Discovery — ~{sec['reading_word_target']} words): Guide decoding of the reading card:\n"
+                f'Reading Text: "{passage}"\n'
+                f'T: "Put your finger under the first word. Sound it out together!" | Ls: Track and decode in pairs.'
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (VAKT Meaning Confirmation): Match decoded words ({w1}, {w2}, {w3}) to pictures and actions without translation.\n"
+                f"Activity 2 (3-Sound Word & Sentence Strip Game): Each pair receives 4 word/phrase strips and 4 pictures to match in 4 minutes.\n"
+                f"Activity 3 (Peer Reading Check): Pairs read 2 matched strips aloud to earn Explorer Badges and Team Points."
+            )
+
+    # 5. 4PS SESSION 3 — I READ & ENJOY (STRUCTURED GAMES)
+    if bp_id == "4ps-read-enjoy":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Game Selection & Clear Rules): Introduce two inclusive reading games: 'Board Race' and 'Word Jumble Race'.\n"
+                f"Game Rules: Teams line up calmly; 1 runner per turn reads a cue card, races to circle/build the word, and passes the marker.\n"
+                f"Activity 2 (Volunteer Demonstration): Run 1 slow practice round with 2 pupils so every learner understands turn-taking and safety."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Game 1 — Board Race Reading): Teacher calls out clues for {w1}, {w2}, {w3}, {w4}; runners find and read the matching board card aloud.\n"
+                f"Activity 2 (Game 2 — Word Jumble Race): Teams unscramble 4 jumbled topic words/chunks on desks (e.g., jumbled letters/word strips for '{clean_topic}').\n"
+                f"Activity 3 (Game 3 — Mini-Pictionary & Pronunciation Check): Volunteers draw {w1} or {w2} while teams read & pronounce the answer to win Gold Stars & Explorer Badges."
+            )
+
+    # 6. 3PS SESSION 3 — I READ & WRITE (PRINT ONLY)
+    if bp_id == "3ps-read-write":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Board Line Zones — Sky, Grass, Earth): Draw 4 handwriting lines on the center board and introduce "
+                f"PRINT/script letter formation ({phonics_target}) — lowercase first, then UPPERCASE (NO cursive).\n"
+                f"Activity 2 (Step-by-Step Stroke Modelling): Teacher traces large print letters slowly while counting strokes aloud.\n"
+                f"Activity 3 (Air & Desk Tracing): Ls trace the shapes in the air and on desks with fingers before touching markers."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Guided Slate Practice): Learners write target print letters and 3 short words ({w1}, {w2}, {w3}) on lined slates; "
+                f"teacher circulates checking sizing, spacing, and alignment.\n"
+                f"Activity 2 (Independent Copybook Print Task): Pupils trace and copy 2 target words and 1 short print sentence "
+                f"(e.g., 'It is {w1}.') checking capital letters and English '?' / '.' orientation (no free essay writing).\n"
+                f"Activity 3 (Neatness Showcase): Best-aligned slates earn Gold Stars and Stickers."
+            )
+
+    # 7. 4PS SESSION 4 — I READ & WRITE (FORM COMPLETION IN CURSIVE)
+    if bp_id == "4ps-read-write":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Session 2 Text Aloud Review): Re-display the Session 2 reading poster:\n"
+                f'Reading Text: "{passage}"\n'
+                f"Activity 2 (Word Bank Extraction): Learners read aloud in chunks and circle key words ({vocab_preview}) on the board for their form."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Topic Form Presentation): Display a large 'My {clean_topic} Card' model form on the center board:\n"
+                f"Model Form: [ Name: ________ | Topic/Item: ________ | Detail: ________ | Favourite: ________ ]\n"
+                f"Word Bank: {vocab_preview}\n"
+                f'Activity 2 (Field Comprehension Check): T: "What do we write next to Name? Where do we put {w1}?" | Ls: Point and answer orally.'
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Cursive Join Demo): Model connected/joined (cursive) strokes on board lines (tall, short, and descender alignment).\n"
+                f"Activity 2 (Individual Form Completion in Cursive): Learners select words from the Word Bank to complete their own 4-field form "
+                f"in joined cursive handwriting (NOT free paragraph composition) while teacher monitors posture and joins.\n"
+                f"Activity 3 (Partner Alignment Check): Pairs compare spacing and neatness; award Handwriting Gold Stars."
+            )
+
+    # 8. 3PS & 4PS PLAY ROLES
+    if "play-roles" in bp_id:
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Model Dialogue with Puppets/Props): Act out the 4-line communicative scene:\n"
+                f"Listening Script: {script}\n"
+                f"Activity 2 (Scaffolded Rehearsal): Pair learners as Speaker A & Speaker B using picture cue cards and props "
+                f"(focus on natural chunks and intonation, zero explicit grammar correction)."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Classroom Mini-Stage): 4–5 volunteer pairs perform the dialogue with props and gestures.\n"
+                f"Activity 2 (Active Audience Task): Listening pupils hold up thumbs-up cards when they hear {w1} or {w2}.\n"
+                f"Activity 3 (Reward Ceremony): Performers and attentive listeners earn Explorer Badges and Team Points."
+            )
+
+    # 9. 5PS — I LISTEN AND INTERACT
+    if bp_id == "5ps-listen-interact":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Picture Walk): Display 3 visuals showing {w1}, {w2}, and {w3}; ask simple descriptive prompts.\n"
+                f'T: "Look at the picture! Who do you see? What are they holding?"\n'
+                f"Activity 2 (Think-Pair-Share): Pupils think silently for 30 seconds, share their initial guess with a partner, then share with class."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (First Listening Pass — Verify Guesses): Read/play the script once clearly:\n"
+                f"Listening Script: {script}\n"
+                f"Activity 2 (Self-Check & Class Confirmation): Learners raise green/red cards to confirm whether their initial guess matched."
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Second & Third Listening Passes): Play/read the script twice more with clear gestures and mimes (multiple listenings mandatory).\n"
+                f"Activity 2 (Single Unambiguous Overall-Idea Task — True/False):\n"
+                f"Task 1: Listen and circle True or False: 1) Meriem knows {w1}. (T/F)  2) They dislike {clean_topic}. (T/F)  3) Amine asks about {w3}. (T/F)\n"
+                f"Answer Key: 1) True  2) False  3) True (encourage self-correction before confirming)."
+            )
+        if "stage 5" in stage_lower:
+            return (
+                f"Activity 1 (Personalized Pair Info-Gap): Pupils ask their partner 2 real-life questions using '{grammar_preview}' and note answers.\n"
+                f'T: "Ask your partner about {w1} and {w2}! Listen carefully!" | Ls: Take turns interviewing in pairs.\n'
+                f"Activity 2 (Mini-Report & Rewards): 3 pairs present their partner's answer to earn Team Points and Explorer Badges."
+            )
+
+    # 10. 5PS — I LISTEN AND DISCOVER
+    if bp_id == "5ps-listen-discover":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Listening Script Recall): Re-read 2 key lines from:\n"
+                f"Listening Script: {script}\n"
+                f"Activity 2 (Oral Leading Questions — Implicit Discovery): Ask Who/What/Where questions so pupils notice word order "
+                f"and subject-verb patterns ({grammar_preview}) implicitly — NEVER use grammatical terminology."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Phase 1 Controlled — Finger Word Boundaries & Hand Intonation): Model 3 target chunks counting each word on fingers "
+                f"and sweeping hand up/down for question/statement intonation; class drills chorally and individually with immediate feedback.\n"
+                f"Activity 2 (Phase 2 Guided Substitution Drill): Hold up cue cards ({w1}, {w2}, {w3}); pairs substitute new words into the frame dialogue.\n"
+                f'T: "Card {w2}! Ask your partner!" | Ls: Pair exchange using correct rising/falling intonation.'
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Personalized Real-Life Role-Play): Pairs invent a 3-turn exchange about their own lives using {clean_topic}.\n"
+                f'T: "Act out your own example with your partner!" | Ls: Perform short personalized exchanges.\n'
+                f"Activity 2 (Supportive Feedback & Stars): Teacher gives gentle immediate recasts and awards Gold Stars."
+            )
+
+    # 11. 5PS — I READ AND UNDERSTAND
+    if bp_id == "5ps-read-understand":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Topic Illustrations): Display pictures of {w1} and {w2}; ask learners to describe colours, people, and actions.\n"
+                f'T: "Look at the picture! What can you see? Who is this?"\n'
+                f"Activity 2 (Peer Guessing): Pairs share a 1-sentence initial guess about what the short text is about."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Silent Reading Verification): Learners read the ~{sec['reading_word_target']}-word text silently for 2 minutes to check their guesses.\n"
+                f'Reading Text: "{passage}"\n'
+                f"Activity 2 (Whole-Class Cross-Check): Pairs compare whether their guesses matched the text."
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Phase 1 Decoding & Meaningful Chunking): Teacher reads '{passage}' aloud with natural phrasing; pupils follow silently, "
+                f"then 4 learners read aloud in meaningful chunks (focus on comprehension & phonics '{phonics_target}', NOT reading speed).\n"
+                f"Activity 2 (Phase 2 Overall-Idea Task — 1 Activity): Circle the best title: A) My School Bag  B) {clean_topic}  C) Winter Holidays.\n"
+                f"Activity 3 (Phase 2 Specific-Details Task — 1 Activity + Process Check): Complete the table [ Name: ____ | Items: ____ , ____ ].\n"
+                f'T: "How did you find {w1}? Show me the exact line!" | Answer Key: Title B; Name: Yacine/Lina; Items: {w1}, {w2}, {w3}.'
+            )
+        if "stage 5" in stage_lower:
+            return (
+                f"Activity 1 (Real-Life Oral Connection): Pairs ask each other: 'Do you have/like {w1} or {w2}?' and share 1 sentence with their group.\n"
+                f'T: "Tell your group about your partner!" | Ls: Share 1 real-life sentence aloud.\n'
+                f"Activity 2 (Cooperation Rewards): Award Explorer Badges and Stickers for clear chunked reading and teamwork."
+            )
+
+    # 12. 5PS — I READ AND DISCOVER
+    if bp_id == "5ps-read-discover":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Reading Text Recall & Question Cards): Display '{passage}' with Who / What / Where / When question cards.\n"
+                f'T: "Look at the Who and What cards! Which word comes first in the sentence?" | Ls: Point to board chunks.\n'
+                f"Activity 2 (Implicit Pattern Noticing): Highlight word boundaries, capital letters, punctuation, and '{grammar_preview}' via leading questions (no grammar rules)."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Phase 1 Controlled — Picture-Prompt Drilling): Show flashcards ({w1}, {w2}, {w3}); teams produce accurate full-sentence responses.\n"
+                f"Activity 2 (Phase 2 Guided — Gap-Fill & Sentence Anagram): Groups complete 2 gap-fill sentences and unscramble 2 word-card anagrams:\n"
+                f"Task 1: 1) I / {w1} / like / .   2) Look / {w2} / at / !   | Answer Key: 1) I like {w1}.  2) Look at {w2}!"
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Info-Gap & Role-Play): Pairs complete missing details on two split cue cards using target questions.\n"
+                f'T: "Ask your partner to fill in the missing card item!" | Ls: Exchange questions and answers in pairs.\n'
+                f"Activity 2 (Immediate Feedback Against Fossilization): Teacher circulates with gentle recasts and awards Team Points."
+            )
+
+    # 13. 5PS — I LEARN AND ENJOY
+    if bp_id == "5ps-learn-enjoy":
+        return (
+            f"Activity 1 (Easy — 'Snap! & Slap the Board' British Spelling): Teams race to slap correct British-English spelling cards ({w1}, {w2}, {w3}, {w4}).\n"
+            f"Activity 2 (Medium — 'Sentence Anagram Relay'): Groups reorder cut-up sentence strips matching '{grammar_preview}' in 6 minutes.\n"
+            f"Activity 3 (Challenge — 'Dictation Race & Phonics Hunt'): Teacher models pronunciation before learners write 3 dictated words/chunks on slates; "
+            f"award Gold Stars, Explorer Badges, and Team Points with immediate feedback."
+        )
+
+    # 14. 5PS — I LEARN TO WRITE (COOPERATIVE)
+    if bp_id == "5ps-learn-to-write":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Model Form + Model Message): Display a completed sample form alongside its ~{sec['writing_word_target']}-word message:\n"
+                f"Model Form: [ Name: Amine | Topic: {clean_topic} | Key Item: {w1} | Preference: {w2} ]\n"
+                f'Model Message: "Hello! I am Amine. Today I talk about {clean_topic}. I like {w1} and {w2}."\n'
+                f"Activity 2 (Goal Check): Clarify how each note in the form becomes one simple linked sentence."
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Phase 1 Modelling for Imitation): Display Form #2 ({w3}, {w4}); elicit each sentence orally with `T:` questions -> `Ls:` answers on board.\n"
+                f"Activity 2 (Phase 2 Small-Group Cooperative Drafting & Linking): Pairs run Q&A on Form #3, then groups of 4 draft 3–4 simple sentences "
+                f"(writing for reinforcement) and link them with capital letters and full stops while teacher gradually fades support.\n"
+                f"Activity 3 (Phase 3 Group Proofreading & Editing): Groups self-check capitalization, full stops, spelling, and word order."
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Classroom Gallery Walk): Groups post their finished messages on the wall; teams rotate to read peers' work.\n"
+                f'T: "Read your classmates\' posters and find one neat sentence!" | Ls: Circulate and give peer feedback.\n'
+                f"Activity 2 (Aloud Showcase & Rewards): 3 groups read aloud and earn Gold Stars & Explorer Badges."
+            )
+
+    # 15. 5PS — I WRITE (INDIVIDUAL)
+    if bp_id == "5ps-write":
+        if "stage 2" in stage_lower:
+            return (
+                f"Activity 1 (Diagnostic Recall of Steps): Elicit the 3 steps practiced in 'I Learn to Write' (Read form -> Draft sentences -> Proofread mechanics).\n"
+                f"Activity 2 (Individual Form Prompt Check): Display the target form [ Name | {clean_topic} | {w1} | {w2} ] and verify every field orally.\n"
+                f'T: "What information goes in box 1? Don\'t forget capital letters!" | Ls: Identify each field aloud.'
+            )
+        if "stage 3" in stage_lower:
+            return (
+                f"Activity 1 (Individual Drafting): Each pupil transforms the form notes into a short ~{sec['writing_word_target']}-word message in their copybook "
+                f"while teacher monitors and collects 3 anonymous sample mistakes on sticky notes.\n"
+                f"Activity 2 (Silent Self-Proofreading): Learners check their own draft for capitals, full stops, and spelling.\n"
+                f"Activity 3 (Board Peer Assessment & Final Editing): Write the 3 anonymous board samples; class spots and fixes errors together, then pupils edit their final copy."
+            )
+        if "stage 4" in stage_lower:
+            return (
+                f"Activity 1 (Aloud Presentation): 4 learners read their final edited message clearly.\n"
+                f'T: "Listen to your classmate! Show green or smiley cards if the message is clear!"\n'
+                f"Activity 2 (Peer Appreciation): Peers raise smiley/thumbs-up/traffic cards and award Classroom Stickers."
+            )
+
+    # 16. 5PS — I GET READY / I CHECK MY PROGRESS
+    if bp_id in ("5ps-get-ready", "5ps-check-progress"):
+        return (
+            f"Activity 1 (Structured Portfolio Task — '{stage_name}'): {stage_spec['procedure']}\n"
+            f"Sample Prompt Material ({clean_topic}): Script: {script} | Text: {passage}\n"
+            f"Activity 2 (Portfolio Storage & Grouping): Collect/file sheets in learners' personal portfolios for progress comparison "
+            f"(fast/average/slow group Pause diagnosis) and reward effort with Star Stickers."
+        )
+
+    # Fallback enriched procedure for any unmatched stage
+    return (
+        f"Activity 1 (Guided Presentation — '{clean_topic}'): {stage_spec['procedure']}\n"
+        f"Target Lexis & Chunks: {vocab_preview} | {grammar_preview}\n"
+        f'T: "Let\'s practice together!" | Ls: Work in {stage_spec["interaction"]} using flashcards and slates to earn Team Points.'
+    )
+
+
 def build_system_prompt(
     grade: str,
     sequence_id: str,
@@ -2234,7 +2643,16 @@ def build_system_prompt(
         f"- Handwriting & Writing Rule: {meta['handwriting_style']}\n\n"
         f"MANDATORY DIDACTIC CONSTRAINTS:\n"
         + "\n".join(f"- {c}" for c in constraints)
-        + "\n\nREQUIRED OUTPUT FORMAT:\n"
+        + "\n\nINSTALL RESOURCES & ACTIVITY DEPTH REQUIREMENTS (CRITICAL):\n"
+        "- Never write vague 1-sentence stage summaries (e.g., do NOT write just 'Read a short text' or 'Drill vocabulary').\n"
+        "- Every 'Install Resources', Presentation, Discovery, Practice, Reading, Writing, or Game stage MUST include 2 to 3 numbered, concrete classroom activities separated by newlines ('Activity 1 (...): ...\\nActivity 2 (...): ...\\nActivity 3 (...): ...').\n"
+        "- Include ready-to-teach classroom content directly inside 'procedure':\n"
+        "  * For Listening stages: include the verbatim 4-line Listening Script (with Algerian pupil names) + 3 concrete oral comprehension questions + drilling/intonation steps.\n"
+        "  * For Reading stages: include the verbatim level-calibrated Reading Text (~20-40 words) + phonics decoding words (segmentation/blending) + concrete comprehension tasks + Answer Key.\n"
+        "  * For Writing stages: include exact letter formation families / model 4-field Form + Word Bank + Model Message + proofreading checklist.\n"
+        "  * For Games / Role-Play stages: include explicit Game Rules, 4 concrete sample items/anagrams/cue cards, and Answer Key.\n"
+        "- Include explicit 'T:' (Teacher script/prompts) and 'Ls:' (Expected learner actions/answers) inside stages.\n\n"
+        "REQUIRED OUTPUT FORMAT:\n"
         "Return ONLY a single valid JSON object (no markdown fences) matching this exact structure:\n"
         "{\n"
         '  "header": {\n'
@@ -2258,10 +2676,10 @@ def build_system_prompt(
         "  },\n"
         '  "stages": [\n'
         "    {\n"
-        '      "minutes": 10,\n'
-        '      "time": "10 mn",\n'
+        '      "minutes": 15,\n'
+        '      "time": "15 mn",\n'
         '      "stage": "exact official stage name",\n'
-        '      "procedure": "detailed teacher and learner tasks + teacher script (NO meta-terms like skim/scan/gist/prediction, NO explicit grammar lectures, NO monetary tokens)",\n'
+        '      "procedure": "Activity 1 (Context & Visuals): ...\\nListening Script / Reading Text / Model Form: ...\\nActivity 2 (Guided Practice / Task + Answer Key): ...\\nT: ... | Ls: ... (NO meta-terms like skim/scan/gist/prediction, NO explicit grammar lectures, NO monetary tokens)",\n'
         '      "interaction": "T-Ls / Pair / Individual / etc.",\n'
         '      "competency_materials": "Domain/Competency | VAKT Materials"\n'
         "    }\n"
@@ -2293,7 +2711,7 @@ def build_system_prompt(
         writing_target_desc = f"~{sec['writing_word_target']} words from form notes"
 
     user_prompt = (
-        f"Generate a complete {duration_minutes}-minute Didactic-compliant lesson plan with these parameters:\n"
+        f"Generate a complete, deeply detailed {duration_minutes}-minute Didactic-compliant lesson plan with these parameters:\n"
         f"- Grade: {g} ({meta['label']})\n"
         f"- Sequence {seq['number']}: {seq['title']} ({seq['guide_pages']})\n"
         f"- Section {sec['number']}: {sec['title']} ({sec['guide_pages']})\n"
@@ -2304,7 +2722,7 @@ def build_system_prompt(
         f"- Implicit Grammar Chunks: {'; '.join(sec['implicit_grammar'])}\n"
         f"- Phonics / Handwriting Target: {sec['phonics_target']}\n"
         f"- Reading Word Target: ~{sec['reading_word_target']} words | Writing Target: {writing_target_desc}\n\n"
-        f"MANDATORY ORDERED STAGES (MUST SUM TO {duration_minutes} MINUTES):\n{stages_guide}\n"
+        f"MANDATORY ORDERED STAGES (MUST SUM TO {duration_minutes} MINUTES, WITH 2-3 DETAILED ACTIVITIES IN EACH INSTALL RESOURCES STAGE):\n{stages_guide}\n"
     )
 
     return system_prompt, user_prompt
@@ -2359,17 +2777,22 @@ def build_default_lesson_plan(
         plan_b = "Model one example interactively on the board, use finger word-boundaries, and scaffold in pairs."
 
     stages: List[Dict[str, Any]] = []
-    for st in bp["stages"]:
-        enriched_proc = (
-            f"[Topic Focus: {clean_topic}] {st['procedure']} "
-            f"(Target lexis: {vocab_str[:110]}{'...' if len(vocab_str) > 110 else ''})."
+    for st_idx, st in enumerate(bp["stages"]):
+        rich_proc = _build_rich_stage_procedure(
+            grade=g,
+            seq=seq,
+            sec=sec,
+            bp=bp,
+            stage_idx=st_idx,
+            stage_spec=st,
+            clean_topic=clean_topic,
         )
         stages.append(
             {
                 "minutes": st["minutes"],
                 "time": f"{st['minutes']} mn",
                 "stage": st["stage"],
-                "procedure": sanitize_non_monetary_gamification(scrub_learner_meta_terms(enriched_proc)),
+                "procedure": sanitize_non_monetary_gamification(scrub_learner_meta_terms(rich_proc)),
                 "interaction": st["interaction"],
                 "competency_materials": st["competency_materials"],
             }
@@ -2383,6 +2806,10 @@ def build_default_lesson_plan(
     )
 
     duration_minutes = int(meta["session_duration_minutes"])
+
+    wb_items = _extract_vocab_items(sec, clean_topic)
+    wb_lexis = ", ".join(wb_items[:6])
+    wb_passage = _build_reading_passage(grade=g, sec=sec, clean_topic=clean_topic, items=wb_items)
 
     return {
         "meta": {
@@ -2444,10 +2871,9 @@ def build_default_lesson_plan(
         "whiteboard_layout": {
             "left_panel": (
                 f"Date: [Day, Date]\n"
-                f"Seq {seq['number']}: {seq['title']}\n"
-                f"{sec['title']}\n"
+                f"Seq {seq['number']}: {seq['title']} | {sec['title']}\n"
                 f"Topic: {clean_topic}\n"
-                f"Flashcards & Lexis:\n{vocab_str}"
+                f"Flashcards & Lexis:\n{wb_lexis}"
             ),
             "center_panel": (
                 f"Session: {bp['short_title']}\n"
@@ -2456,15 +2882,15 @@ def build_default_lesson_plan(
                 + (
                     "Note: NO written words on board during Session 1 Listen & Repeat!"
                     if g in ("3PS", "4PS") and "listen-repeat" in bp["id"]
-                    else f"Target Output: {meta['project_title']} practice"
+                    else f"Model Text / Task:\n{wb_passage}"
                 )
             ),
             "right_panel": (
                 "Classroom Reward Board:\n"
                 "- Team A: ★ ★ ★ (Explorer Badges)\n"
                 "- Team B: ★ ★ ★ (Team Points)\n"
-                "Learner Slate / Error-Check Zone:\n"
-                "[Teacher models examples & smiley feedback]"
+                f"Learner Slate Zone:\nTry: {wb_items[0]} | {wb_items[1] if len(wb_items) > 1 else clean_topic}\n"
+                "[Teacher models & smiley check]"
             ),
         },
         "self_reflection": {

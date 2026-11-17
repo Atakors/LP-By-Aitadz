@@ -206,6 +206,21 @@ def _add_field(paragraph: Any, field_name: str, font_size: float = 8.5, color: R
     run_end._r.append(fld_end)
 
 
+_RICH_PREFIX_RE = re.compile(
+    r"^((?:[•\-]\s*)?"
+    r"(?:Activity\s+\d+(?:\s*\([^)]+\))?"
+    r"|Task\s+\d+(?:\s*\([^)]+\))?"
+    r"|Phase\s+\d+(?:\s*\([^)]+\))?"
+    r"|Step\s+\d+(?:\s*\([^)]+\))?"
+    r"|Listening\s+Script|Reading\s+Text|Listening\s*/\s*Reading\s+Model"
+    r"|Model\s+Form|Practice\s+Form|Model\s+Message|Word\s+Bank|Answer\s+Key|Game\s+Rules"
+    r"|Target\s+Lexis(?:\s*&\s*Chunks)?|Model\s+Chunks\s*/\s*Prompts|Phonics\s*/\s*Mechanics"
+    r"|Model\s+Text\s*/\s*Task|Flashcards\s*&\s*Lexis|Classroom\s+Reward\s+Board"
+    r"|Learner\s+Slate\s+Zone|Topic|Session|Date|Teacher|Learners|T|Ls)"
+    r":)\s*(.*)$"
+)
+
+
 def _write_cell_text(
     cell: Any,
     text: str,
@@ -217,6 +232,7 @@ def _write_cell_text(
     align: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.LEFT,
     valign: WD_ALIGN_VERTICAL = WD_ALIGN_VERTICAL.CENTER,
     space_after: float = 1.5,
+    rich_prefixes: bool = False,
 ) -> None:
     cell.vertical_alignment = valign
     lines = (text or "").splitlines() or [""]
@@ -227,12 +243,31 @@ def _write_cell_text(
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(space_after if idx < len(lines) - 1 else 0)
         p.paragraph_format.line_spacing = 1.12
-        run = p.add_run(line)
-        run.bold = bold
-        run.italic = italic
-        run.font.name = FONT_FAMILY
-        run.font.size = Pt(font_size)
-        run.font.color.rgb = color
+
+        match = _RICH_PREFIX_RE.match(line) if rich_prefixes and not bold else None
+        if match:
+            prefix, rest = match.group(1), match.group(2)
+            p_run = p.add_run(prefix + (" " if rest else ""))
+            p_run.bold = True
+            p_run.italic = italic
+            p_run.font.name = FONT_FAMILY
+            p_run.font.size = Pt(font_size)
+            p_run.font.color.rgb = COLOR_DEEP_NAVY
+
+            if rest:
+                r_run = p.add_run(rest)
+                r_run.bold = False
+                r_run.italic = italic
+                r_run.font.name = FONT_FAMILY
+                r_run.font.size = Pt(font_size)
+                r_run.font.color.rgb = color
+        else:
+            run = p.add_run(line)
+            run.bold = bold
+            run.italic = italic
+            run.font.name = FONT_FAMILY
+            run.font.size = Pt(font_size)
+            run.font.color.rgb = color
 
 
 def _add_section_title(doc: Document, title: str, accent_hex: str = HEX_PRIMARY_BLUE) -> None:
@@ -503,7 +538,9 @@ def build_lesson_plan_docx(
     total_minutes = 0
     for r_idx, st in enumerate(stages):
         row = proc_table.add_row()
-        _prevent_row_split(row)
+        proc_text = str(st.get("procedure", ""))
+        if len(proc_text.splitlines()) <= 16:
+            _prevent_row_split(row)
         bg_hex = HEX_SOFT_GRAY if r_idx % 2 == 1 else HEX_WHITE
         mins = int(st.get("minutes", 0) or 0)
         total_minutes += mins
@@ -511,7 +548,7 @@ def build_lesson_plan_docx(
         row_values = [
             st.get("time") or f"{mins} mn",
             st.get("stage", ""),
-            st.get("procedure", ""),
+            proc_text,
             st.get("interaction", ""),
             st.get("competency_materials", ""),
         ]
@@ -528,6 +565,8 @@ def build_lesson_plan_docx(
                 color=COLOR_PRIMARY_BLUE if c_idx == 0 else (COLOR_DEEP_NAVY if c_idx == 1 else COLOR_TEXT_DARK),
                 align=WD_ALIGN_PARAGRAPH.CENTER if c_idx in (0, 3) else WD_ALIGN_PARAGRAPH.LEFT,
                 valign=WD_ALIGN_VERTICAL.TOP,
+                space_after=2.0 if c_idx == 2 else 1.5,
+                rich_prefixes=(c_idx == 2),
             )
 
     # Total time verification footer row
@@ -657,6 +696,7 @@ def build_lesson_plan_docx(
             font_size=8.2,
             color=COLOR_TEXT_DARK,
             valign=WD_ALIGN_VERTICAL.TOP,
+            rich_prefixes=True,
         )
 
     # -----------------------------------------------------------------------

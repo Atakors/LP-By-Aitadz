@@ -286,6 +286,31 @@ function ensureObjectiveFormula(rawObjective, topic) {
   return `${OBJECTIVE_PREFIX} ${cleaned.charAt(0).toLowerCase()}${cleaned.slice(1)}`;
 }
 
+function buildRichFallbackProcedure(stageName, topic, interaction) {
+  const lower = String(stageName || "").toLowerCase();
+  if (lower.includes("exit ticket") || lower.includes("feedback")) {
+    return (
+      `Activity 1 (Ticket to Leave): Show 3 flashcards for "${topic}" and prompt each pupil individually.\n` +
+      `T: "Share one word or phrase you learnt today and show your confidence card!"\n` +
+      `Ls: Produce one target item aloud and raise a green/amber/red smiley card to earn a Gold Star Sticker.`
+    );
+  }
+  if (lower.includes("warmer") || lower.includes("warm-up") || lower.includes("sing")) {
+    return (
+      `Activity 1 (VAKT Energizer): Display topic visuals for "${topic}" and run a brisk song/flashcard chant.\n` +
+      `T: "Look, listen, and clap when you hear the key words!"\n` +
+      `Ls: Sing/chant together in ${interaction || "Whole class"} with gestures to earn Team Points.`
+    );
+  }
+  return (
+    `Activity 1 (Visual Context & Model): Present "${topic}" using flashcards, realia, and mimes (no explicit grammar lectures).\n` +
+    `Listening / Reading Model: Amine: "Look at ${topic}!" | Lina: "Is it nice?" | Amine: "Yes, it is great!"\n` +
+    `Activity 2 (Guided Practice & Scaffolding): Lead choral then pair practice in ${interaction || "T-Ls / Pair"} checking pronunciation, word boundaries, and meaning.\n` +
+    `Activity 3 (Interactive Classroom Task & Star Challenge): Pairs/teams complete 4 target card prompts and earn Gold Stars & Explorer Badges.\n` +
+    `T: "Great teamwork! Check your answers together." | Ls: Verify answers and report aloud.`
+  );
+}
+
 function buildBaselineStages(args, targetMinutes) {
   const schemaStages = args?.didactic_schema?.stages;
   const topic = String(args?.topic || "the lesson topic").trim();
@@ -304,7 +329,7 @@ function buildBaselineStages(args, targetMinutes) {
       minutes: mins[idx],
       time: `${mins[idx]} mn`,
       stage: String(s.stage || `Stage ${idx + 1}`),
-      procedure: `Guide learners through ${s.stage || "this stage"} focused on "${topic}" using visuals, modelling, and Team Points / Gold Stars.`,
+      procedure: buildRichFallbackProcedure(s.stage, topic, s.interaction),
       interaction: String(s.interaction || "T-Ls"),
       competency_materials: "Flashcards, realia, whiteboard, slates",
     }));
@@ -316,7 +341,9 @@ function buildBaselineStages(args, targetMinutes) {
         minutes: 15,
         time: "15 mn",
         stage: "Stage 1: Warm-up (Warmer)",
-        procedure: `Engage learners with a lively song/game introducing "${topic}" via visuals and gestures.`,
+        procedure:
+          `Activity 1 (Visual Song / Chant): Pin flashcards for "${topic}" and lead a 2-pass rhythm chant.\n` +
+          `T: "Clap and point when you hear our new topic words!" | Ls: Sing/chant with mimes to win Team Points.`,
         interaction: "T-Ls / Whole class",
         competency_materials: "Flashcards, song audio",
       },
@@ -324,7 +351,11 @@ function buildBaselineStages(args, targetMinutes) {
         minutes: 20,
         time: "20 mn",
         stage: "Stage 2: Presentation & Discovery (Install Resources)",
-        procedure: `Model target chunks and sounds for "${topic}" implicitly using flashcards, realia, and choral/individual repetition.`,
+        procedure:
+          `Activity 1 (Visual Context & Input): Introduce "${topic}" through flashcards, realia, and a short 4-line dialogue.\n` +
+          `Listening Script: Amine: "Hello, Lina! Look at ${topic}!" | Lina: "Wow, I like it!"\n` +
+          `Activity 2 (Choral -> Group -> Individual Drilling): Model chunks and target sounds; pupils repeat chorally and individually.\n` +
+          `T: "Repeat after me with gestures!" | Ls: Echo chunks cleanly.`,
         interaction: "T-Ls / Ls-T",
         competency_materials: "Flashcards, puppets, board",
       },
@@ -332,7 +363,10 @@ function buildBaselineStages(args, targetMinutes) {
         minutes: 20,
         time: "20 mn",
         stage: "Stage 3: Guided Practice & Classroom Game (Install Resources)",
-        procedure: `Run interactive pair/group tasks and a friendly Star Challenge around "${topic}"; award Gold Stars and Explorer Badges.`,
+        procedure:
+          `Activity 1 (Pair Card Matching): Pairs match 4 visual cue cards to target chunks for "${topic}".\n` +
+          `Activity 2 (Friendly Star Challenge — Board Race): Teams race in turns to identify/read cards and earn Gold Stars & Explorer Badges.\n` +
+          `T: "Ready, set, point and say!" | Ls: Collaborate respectfully and pronounce items clearly.`,
         interaction: "Pair / Group",
         competency_materials: "Word/picture cards, Star Tracker",
       },
@@ -340,7 +374,9 @@ function buildBaselineStages(args, targetMinutes) {
         minutes: 5,
         time: "5 mn",
         stage: "Stage 4: Feedback / Exit Ticket (Assessment)",
-        procedure: `Ticket to leave: learners demonstrate one target chunk or sound from "${topic}" and pick a smiley card.`,
+        procedure:
+          `Activity 1 (Ticket to Leave): Each pupil produces one target chunk for "${topic}" and holds up a green/amber/red smiley card.\n` +
+          `Activity 2 (Positive Closure): Award final Star Stickers on the team chart.`,
         interaction: "Individual / T-Ls",
         competency_materials: "Exit Ticket cards, stickers",
       },
@@ -352,7 +388,9 @@ function buildBaselineStages(args, targetMinutes) {
       minutes: 5,
       time: "5 mn",
       stage: "Stage 1: Warm-up (Warmer)",
-      procedure: `Run a brisk phonemic awareness game activating vocabulary for "${topic}".`,
+      procedure:
+        `Activity 1 (Phonemic Flash Game): Flash 4 cards for "${topic}" and guide sound blending/segmenting.\n` +
+        `T: "Sound it out together!" | Ls: Blend sounds orally for Team Points.`,
       interaction: "T-Ls",
       competency_materials: "Flashcards",
     },
@@ -360,15 +398,21 @@ function buildBaselineStages(args, targetMinutes) {
       minutes: 15,
       time: "15 mn",
       stage: "Stage 2: Discovery & Modelling (Install Resources)",
-      procedure: `Present "${topic}" in context via visuals and leading questions; guide implicit noticing without grammar lectures.`,
+      procedure:
+        `Activity 1 (Visual Anticipation via Think-Pair-Share): Show 3 pictures for "${topic}" and gather initial guesses.\n` +
+        `Activity 2 (Implicit Noticing): Present the short text/script and use Who/What/Where leading questions (zero grammar labels).\n` +
+        `Listening / Reading Model: Amine: "Today we explore ${topic}." | Meriem: "Let's look closely!"`,
       interaction: "T-Ls / Pair (TPS)",
       competency_materials: "Text/audio prompt, flashcards",
     },
     {
       minutes: 20,
       time: "20 mn",
-      stage: "Stage 3: Practice & Communicative Use (Assessment)",
-      procedure: `Conduct controlled drills followed by personalized pair/group tasks on "${topic}"; award Team Points and Explorer Badges.`,
+      stage: "Stage 3: Practice & Communicative Use (Install Resources / Assessment)",
+      procedure:
+        `Activity 1 (Controlled Substitution Drill): Model chunks with finger word boundaries and hand intonation; pairs substitute prompts.\n` +
+        `Activity 2 (Guided Gap-Fill / Anagram Task): Pairs complete 3 short items with immediate feedback.\n` +
+        `Activity 3 (Personalized Role-Play): Pairs act out a real-life mini-dialogue on "${topic}" to earn Gold Stars & Explorer Badges.`,
       interaction: "Pair / Group",
       competency_materials: "Cue cards, slates, Star Chart",
     },
@@ -376,7 +420,9 @@ function buildBaselineStages(args, targetMinutes) {
       minutes: 5,
       time: "5 mn",
       stage: "Stage 4: Feedback / Exit Ticket (Assessment)",
-      procedure: `Exit Ticket: learners share what they learned and enjoyed about "${topic}".`,
+      procedure:
+        `Activity 1 (Ticket to Leave): Learners share one thing they learnt and one challenge on an Exit Ticket card.\n` +
+        `T: "Great effort today!" | Ls: Hand in exit cards and collect Star Stickers.`,
       interaction: "Individual / T-Ls",
       competency_materials: "Exit Ticket slips, stickers",
     },
@@ -540,10 +586,10 @@ function buildFallbackPrompts(args, expectedMinutes) {
   const topic = String(args.topic || "Primary English").trim();
   const sysPrompt =
     args.system_prompt ||
-    `You are an Algerian Primary English Didactic Designer. Return ONLY valid JSON for a ${expectedMinutes}-minute ${grade} (${guide.guide}) lesson plan. Handwriting rule: ${guide.handwriting} No explicit grammar lectures, no learner meta-terms (skim/scan/gist/prediction), and non-monetary classroom rewards only (Gold Stars, Explorer Badges, Team Points, Stickers).`;
+    `You are an Algerian Primary English Didactic Designer. Return ONLY valid JSON for a ${expectedMinutes}-minute ${grade} (${guide.guide}) lesson plan. Handwriting rule: ${guide.handwriting} Every Install Resources / Practice / Reading / Writing stage MUST contain 2-3 numbered classroom activities ('Activity 1 (...): ...\\nActivity 2 (...): ...\\nActivity 3 (...): ...'), verbatim Listening Script / Reading Text / Model Form + Answer Key, and explicit 'T:' / 'Ls:' micro-interactions. No explicit grammar lectures, no learner meta-terms (skim/scan/gist/prediction), and non-monetary classroom rewards only (Gold Stars, Explorer Badges, Team Points, Stickers).`;
   const userPrompt =
     args.user_prompt ||
-    `Create a ${expectedMinutes}-minute ${grade} lesson plan for Sequence "${args.sequence || ""}", Section "${args.section || ""}", Session "${args.session || ""}", Topic "${topic}". Return valid JSON with keys: header, stages, gamification, exit_ticket, whiteboard_layout, self_reflection.`;
+    `Create a deeply detailed ${expectedMinutes}-minute ${grade} lesson plan for Sequence "${args.sequence || ""}", Section "${args.section || ""}", Session "${args.session || ""}", Topic "${topic}". Return valid JSON with keys: header, stages, gamification, exit_ticket, whiteboard_layout, self_reflection.`;
   return { sysPrompt, userPrompt };
 }
 
@@ -586,7 +632,7 @@ async function runLessonGeneration(args, env = {}) {
         { role: "user", content: userPrompt },
       ],
       temperature: 0.2,
-      max_tokens: 2400,
+      max_tokens: 4096,
     });
   }
 
