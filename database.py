@@ -18,6 +18,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from docx_builder import normalize_template_id
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -70,6 +72,7 @@ class Database:
                     total_generated INTEGER NOT NULL DEFAULT 0,
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     is_banned INTEGER NOT NULL DEFAULT 0,
+                    preferred_template TEXT NOT NULL DEFAULT 'classic',
                     created_at TEXT NOT NULL,
                     last_active_at TEXT NOT NULL
                 );
@@ -85,6 +88,7 @@ class Database:
                     section_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     topic TEXT NOT NULL,
+                    template_id TEXT NOT NULL DEFAULT 'classic',
                     credits_used INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -103,6 +107,23 @@ class Database:
                 );
                 """
             )
+            # Safe schema migrations for databases created before template selection.
+            user_cols = {
+                row["name"]
+                for row in cur.execute("PRAGMA table_info(users);").fetchall()
+            }
+            if "preferred_template" not in user_cols:
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN preferred_template TEXT NOT NULL DEFAULT 'classic';"
+                )
+            gen_cols = {
+                row["name"]
+                for row in cur.execute("PRAGMA table_info(generations);").fetchall()
+            }
+            if "template_id" not in gen_cols:
+                cur.execute(
+                    "ALTER TABLE generations ADD COLUMN template_id TEXT NOT NULL DEFAULT 'classic';"
+                )
             self._conn.commit()
 
     def close(self) -> None:
@@ -223,6 +244,43 @@ class Database:
             )
             self._conn.commit()
 
+    def get_preferred_template(self, user_id: int) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT preferred_template FROM users WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+            return normalize_template_id(row["preferred_template"]) if row else "classic"
+
+    def set_preferred_template(self, user_id: int, template_id: str) -> str:
+        resolved = normalize_template_id(template_id)
+        now = _utc_now_iso()
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "UPDATE users SET preferred_template = ?, last_active_at = ? WHERE user_id = ?",
+                (resolved, now, int(user_id)),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    """
+                    INSERT INTO users (
+                        user_id, chat_id, credits, total_generated, is_admin,
+                        is_banned, preferred_template, created_at, last_active_at
+                    ) VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?)
+                    """,
+                    (
+                        int(user_id),
+                        int(user_id),
+                        self.default_credits,
+                        resolved,
+                        now,
+                        now,
+                    ),
+                )
+            self._conn.commit()
+            return resolved
+
     # -----------------------------------------------------------------------
     # CREDIT TOKEN MANAGEMENT
     # -----------------------------------------------------------------------
@@ -335,15 +393,18 @@ class Database:
         session_id: str,
         topic: str,
         credits_used: int = 1,
+        template_id: str = "classic",
     ) -> None:
         now = _utc_now_iso()
+        resolved_tpl = normalize_template_id(template_id)
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
                 """
                 INSERT INTO generations (
-                    user_id, grade, sequence_id, section_id, session_id, topic, credits_used, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    user_id, grade, sequence_id, section_id, session_id, topic,
+                    template_id, credits_used, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(user_id),
@@ -352,6 +413,7 @@ class Database:
                     section_id,
                     session_id,
                     topic,
+                    resolved_tpl,
                     int(credits_used),
                     now,
                 ),
@@ -390,6 +452,15 @@ class Database:
             for r in grade_rows:
                 by_grade[r["grade"]] = int(r["cnt"])
 
+            tpl_rows = cur.execute(
+                "SELECT COALESCE(template_id, 'classic') AS tpl, COUNT(*) AS cnt "
+                "FROM generations GROUP BY COALESCE(template_id, 'classic')"
+            ).fetchall()
+            by_template = {"classic": 0, "modern": 0}
+            for r in tpl_rows:
+                key = normalize_template_id(r["tpl"])
+                by_template[key] = by_template.get(key, 0) + int(r["cnt"])
+
             top_users = [
                 dict(r)
                 for r in cur.execute(
@@ -422,6 +493,7 @@ class Database:
                 "total_generations": int(total_generations),
                 "generations_today": int(generations_today),
                 "by_grade": by_grade,
+                "by_template": by_template,
                 "top_users": top_users,
                 "recent_generations": recent_generations,
             }

@@ -37,8 +37,15 @@ from didactic_rules import (
     get_session_blueprint,
     get_sessions,
 )
-from docx_builder import build_lesson_plan_docx, generate_clean_filename
+from docx_builder import (
+    TEMPLATES,
+    build_lesson_plan_docx,
+    generate_clean_filename,
+    get_template_meta,
+    normalize_template_id,
+)
 from mcp_client import CloudflareMCPClient
+from template_previews import get_preview_image_path
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 _SESSION_LOCK = threading.Lock()
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
+_PREVIEW_CACHE_LOCK = threading.Lock()
+_PREVIEW_FILE_IDS: Dict[tuple[str, str], str] = {}
 GENERATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.environ.get("AITADZ_WORKERS", "4")),
     thread_name_prefix="aitadz-gen",
@@ -143,13 +152,50 @@ def reset_session_state(chat_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_grade_keyboard() -> types.InlineKeyboardMarkup:
+def build_grade_keyboard(selected_template: str = "classic") -> types.InlineKeyboardMarkup:
+    tpl_meta = get_template_meta(selected_template)
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
         types.InlineKeyboardButton("🟢 3PS - Year 3 Primary (Key Stage 1)", callback_data="grade:3PS"),
         types.InlineKeyboardButton("🔵 4PS - Year 4 Primary (Key Stage 1)", callback_data="grade:4PS"),
         types.InlineKeyboardButton("🟣 5PS - Year 5 Primary (Key Stage 3)", callback_data="grade:5PS"),
+        types.InlineKeyboardButton(
+            f"🎨 Templates & Previews ({tpl_meta['short_name']})",
+            callback_data="nav:templates",
+        ),
     )
+    return kb
+
+
+def build_templates_menu_keyboard(
+    selected_template: str = "classic",
+    back_callback: str = "nav:grades",
+) -> types.InlineKeyboardMarkup:
+    selected = normalize_template_id(selected_template)
+    c_mark = "✅ " if selected == "classic" else ""
+    m_mark = "✅ " if selected == "modern" else ""
+    back_label = "⬅️ Back to Lesson Setup" if back_callback == "nav:topic" else "⬅️ Back to Grades"
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton(
+            f"{c_mark}1️⃣ AITADZ Classic Didactic",
+            callback_data="tpl:classic",
+        ),
+        types.InlineKeyboardButton(
+            f"{m_mark}2️⃣ Executive Standard (4Cs & VARK)",
+            callback_data="tpl:modern",
+        ),
+        types.InlineKeyboardButton(
+            "👁️ Side-by-Side Comparison Preview",
+            callback_data="preview:both",
+        ),
+    )
+    kb.row(
+        types.InlineKeyboardButton("🔍 Classic Sample", callback_data="preview:classic"),
+        types.InlineKeyboardButton("🔍 Executive Sample", callback_data="preview:modern"),
+    )
+    kb.add(types.InlineKeyboardButton(back_label, callback_data=back_callback))
     return kb
 
 
@@ -192,9 +238,17 @@ def build_session_keyboard(grade: str) -> types.InlineKeyboardMarkup:
     return kb
 
 
-def build_topic_keyboard() -> types.InlineKeyboardMarkup:
+def build_topic_keyboard(selected_template: str = "classic") -> types.InlineKeyboardMarkup:
+    selected = normalize_template_id(selected_template)
+    c_mark = "✅ " if selected == "classic" else ""
+    m_mark = "✅ " if selected == "modern" else ""
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.row(
+        types.InlineKeyboardButton(f"{c_mark}📄 Classic", callback_data="tpl:classic"),
+        types.InlineKeyboardButton(f"{m_mark}✨ Executive (4Cs)", callback_data="tpl:modern"),
+    )
     kb.add(
+        types.InlineKeyboardButton("👁️ Preview Templates (Visual Sample)", callback_data="preview:both"),
         types.InlineKeyboardButton(
             "✨ Use Official Syllabus Topic & Generate Now",
             callback_data="topic:default",
@@ -231,6 +285,7 @@ def run_generation_pipeline(
     db_instance: Optional[Database] = None,
     credit_deducted: bool = False,
     is_admin: bool = False,
+    template_id: str = "classic",
 ) -> Optional[str]:
     """
     Execute lesson generation via Cloudflare MCP Portal, build the branded A4
@@ -258,9 +313,12 @@ def run_generation_pipeline(
             bp["short_title"],
         )
 
+        resolved_tpl = normalize_template_id(template_id)
+        tpl_meta = get_template_meta(resolved_tpl)
+
         tmp_dir = tempfile.mkdtemp(prefix="aitadz_tg_")
         output_path = os.path.join(tmp_dir, filename)
-        build_lesson_plan_docx(plan_data, output_path=output_path)
+        build_lesson_plan_docx(plan_data, output_path=output_path, template_id=resolved_tpl)
 
         credit_line = ""
         if db_instance is not None and user_id is not None:
@@ -272,6 +330,7 @@ def run_generation_pipeline(
                 session_id=session_id,
                 topic=meta["topic"],
                 credits_used=0 if is_admin else (1 if credit_deducted else 0),
+                template_id=resolved_tpl,
             )
             if is_admin:
                 credit_line = "🎟️ <b>Credits:</b> Unlimited (Admin)\n"
@@ -288,6 +347,7 @@ def run_generation_pipeline(
             f"📂 <b>Section:</b> {html.escape(header['section'])}\n"
             f"📝 <b>Session:</b> {html.escape(bp['title'])}\n"
             f"🎯 <b>Topic Focus:</b> {html.escape(meta['topic'])}\n"
+            f"🎨 <b>Template:</b> {html.escape(tpl_meta['name'])}\n"
             f"⏱️ <b>Duration:</b> {html.escape(duration_str)} (A4 Print-Ready • Didactic Guide Compliant)\n"
             f"{credit_line}\n"
             f"<i>Generated by AITADZ Teacher Assistant (aitadz.pro)</i>"
@@ -399,6 +459,123 @@ def create_bot(
         except Exception:
             pass
 
+    def _resolve_active_template(chat_id: int, from_user: Any = None) -> str:
+        state = get_session_state(chat_id)
+        if state.get("template_id"):
+            return normalize_template_id(state["template_id"])
+        uid = getattr(from_user, "id", None) or chat_id
+        return database.get_preferred_template(int(uid))
+
+    def _templates_menu_text(active_tpl: str) -> str:
+        resolved = normalize_template_id(active_tpl)
+        tpl_meta = get_template_meta(resolved)
+        return (
+            f"🎨 <b>AITADZ A4 DOCX Template Selector</b>\n\n"
+            f"Active Template: <b>{html.escape(tpl_meta['name'])}</b>\n\n"
+            f"1️⃣ <b>AITADZ Classic Didactic</b>\n"
+            f"• Official Ministry/CNP header, 13-row metadata grid, 5-column procedure table, "
+            f"Non-Monetary Gamification box, 3-panel Visual Whiteboard &amp; 3-col Reflection.\n\n"
+            f"2️⃣ <b>Executive Standard (4Cs &amp; VARK)</b>\n"
+            f"• Dark-navy banner, 2×2 Session/Subsidiary Objectives &amp; Anticipated Problems/Solutions card, "
+            f"4Cs Skills strip, Lesson Execution Stages (Presentation / Practice / Production + VARK) "
+            f"&amp; dashed Self-Reflection.\n\n"
+            f"👇 Select your default DOCX layout or inspect visual previews below:"
+        )
+
+    def _topic_step_payload(
+        chat_id: int,
+        active_tpl: str,
+    ) -> Optional[tuple[str, types.InlineKeyboardMarkup]]:
+        state = get_session_state(chat_id)
+        grade = state.get("grade")
+        sequence_id = state.get("sequence_id")
+        section_id = state.get("section_id")
+        session_id = state.get("session_id")
+        if not (grade and sequence_id and section_id and session_id):
+            return None
+        seq = get_sequence_by_id(grade, sequence_id)
+        sec = get_section_by_id(grade, sequence_id, section_id)
+        bp = get_session_blueprint(grade, session_id)
+        tpl_meta = get_template_meta(active_tpl)
+        vocab_preview = ", ".join(sec["key_vocabulary"][:6])
+        text = (
+            f"✅ <b>Selection Summary</b>\n"
+            f"• <b>Grade:</b> {html.escape(grade)}\n"
+            f"• <b>Sequence {seq['number']}:</b> {html.escape(seq['title'])}\n"
+            f"• <b>Section:</b> {html.escape(sec['title'])}\n"
+            f"• <b>Session:</b> {html.escape(bp['title'])}\n"
+            f"• <b>Key Lexis:</b> {html.escape(vocab_preview)}\n"
+            f"• 🎨 <b>DOCX Template:</b> {html.escape(tpl_meta['name'])}\n\n"
+            f"✍️ <b>Step 3: Reply with your specific Lesson Topic, Target Vocabulary, "
+            f"or Grammar structure</b> (e.g., <i>\"Rooms of the house &amp; Is there a...?\"</i>),\n"
+            f"or tap below to switch templates, preview visuals, or generate now:"
+        )
+        return text, build_topic_keyboard(active_tpl)
+
+    def _send_template_preview(
+        chat_id: int,
+        kind: str,
+        selected_tpl: str,
+        back_callback: str,
+    ) -> None:
+        clean_kind = kind if kind in {"classic", "modern", "both"} else "both"
+        captions = {
+            "classic": (
+                "1️⃣ <b>AITADZ Classic Didactic — Visual Sample</b>\n"
+                "Official Ministry header • 13-row metadata • 5-column Procedure Grid • "
+                "Non-Monetary Gamification • 3-Panel Whiteboard • Self-Reflection."
+            ),
+            "modern": (
+                "2️⃣ <b>Executive Standard (4Cs &amp; VARK) — Visual Sample</b>\n"
+                "Navy &amp; royal-blue banner • 2×2 Objectives / Anticipated Problems &amp; Solutions • "
+                "4Cs Skills cards • Stage Execution (Presentation/Practice/Production + VARK) • "
+                "Dashed Self-Reflection."
+            ),
+            "both": (
+                "👁️ <b>AITADZ Template Comparison (Print-Ready A4)</b>\n\n"
+                "<b>Left (1):</b> AITADZ Classic Didactic\n"
+                "<b>Right (2):</b> Executive Standard (4Cs &amp; VARK)\n\n"
+                "👇 Tap a button below to choose your preferred DOCX layout:"
+            ),
+        }
+        markup = build_templates_menu_keyboard(selected_tpl, back_callback=back_callback)
+        cache_key = (resolved_token, clean_kind)
+        with _PREVIEW_CACHE_LOCK:
+            cached_file_id = _PREVIEW_FILE_IDS.get(cache_key)
+
+        if cached_file_id:
+            try:
+                bot_instance.send_photo(
+                    chat_id,
+                    photo=cached_file_id,
+                    caption=captions[clean_kind],
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                return
+            except Exception:
+                with _PREVIEW_CACHE_LOCK:
+                    _PREVIEW_FILE_IDS.pop(cache_key, None)
+
+        img_path = get_preview_image_path(clean_kind)
+        with open(img_path, "rb") as photo_file:
+            sent = bot_instance.send_photo(
+                chat_id,
+                photo=photo_file,
+                caption=captions[clean_kind],
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        photos = getattr(sent, "photo", None)
+        if photos:
+            try:
+                file_id = getattr(photos[-1], "file_id", None)
+                if file_id:
+                    with _PREVIEW_CACHE_LOCK:
+                        _PREVIEW_FILE_IDS[cache_key] = file_id
+            except Exception:
+                pass
+
     def _start_generation(
         chat_id: int,
         topic_text: str,
@@ -410,15 +587,20 @@ def create_bot(
         section_id = state.get("section_id")
         session_id = state.get("session_id")
         if not (grade and sequence_id and section_id and session_id):
+            active_tpl = _resolve_active_template(chat_id, from_user)
             bot_instance.send_message(
                 chat_id,
                 "Please select your Grade, Sequence, Section, and Session first:",
-                reply_markup=build_grade_keyboard(),
+                reply_markup=build_grade_keyboard(active_tpl),
             )
             return
 
         user_row, admin_flag = _sync_user(from_user, chat_id)
         uid = int(user_row["user_id"])
+        template_id = normalize_template_id(
+            state.get("template_id") or database.get_preferred_template(uid)
+        )
+        tpl_meta = get_template_meta(template_id)
 
         credit_deducted = False
         if not admin_flag:
@@ -438,10 +620,15 @@ def create_bot(
                 return
             credit_deducted = True
 
-        update_session_state(chat_id, awaiting_topic=False, topic=topic_text)
+        update_session_state(
+            chat_id,
+            awaiting_topic=False,
+            topic=topic_text,
+            template_id=template_id,
+        )
         status_msg = bot_instance.send_message(
             chat_id,
-            "⏳ Generating your Didactic-compliant DOCX lesson plan...",
+            f"⏳ Generating your Didactic-compliant DOCX lesson plan ({tpl_meta['short_name']})...",
         )
         status_id = getattr(status_msg, "message_id", None)
         client = make_mcp()
@@ -462,6 +649,7 @@ def create_bot(
                 database,
                 credit_deducted,
                 admin_flag,
+                template_id,
             )
         else:
             run_generation_pipeline(
@@ -478,27 +666,43 @@ def create_bot(
                 database,
                 credit_deducted,
                 admin_flag,
+                template_id,
             )
 
     @bot_instance.message_handler(commands=["start", "plan", "help", "reset"])
     def handle_start(message: types.Message) -> None:
         user_row, admin_flag = _sync_user(message.from_user, message.chat.id)
+        active_tpl = database.get_preferred_template(int(user_row["user_id"]))
         reset_session_state(message.chat.id)
+        update_session_state(message.chat.id, template_id=active_tpl)
+        tpl_meta = get_template_meta(active_tpl)
         credits_badge = (
             "♾️ <b>Admin Unlimited</b>"
             if admin_flag
             else f"🎟️ <b>Available Credits:</b> {user_row['credits']}"
         )
         admin_hint = (
-            "\n🛠️ <b>Admin Commands:</b> /stats • /users • /addcredits • /export_users"
+            "\n🛠️ <b>Admin Commands:</b> /templates • /stats • /users • /addcredits • /export_users"
             if admin_flag
-            else "\n💡 Check /credits or /myid anytime."
+            else "\n💡 Check /templates, /credits or /myid anytime."
         )
         bot_instance.send_message(
             message.chat.id,
-            f"{_welcome_text()}\n\n{credits_badge}{admin_hint}",
+            f"{_welcome_text()}\n\n🎨 <b>Active Template:</b> {html.escape(tpl_meta['name'])}\n{credits_badge}{admin_hint}",
             parse_mode="HTML",
-            reply_markup=build_grade_keyboard(),
+            reply_markup=build_grade_keyboard(active_tpl),
+        )
+
+    @bot_instance.message_handler(commands=["templates", "template"])
+    def handle_templates_command(message: types.Message) -> None:
+        user_row, _ = _sync_user(message.from_user, message.chat.id)
+        active_tpl = database.get_preferred_template(int(user_row["user_id"]))
+        update_session_state(message.chat.id, template_id=active_tpl)
+        bot_instance.send_message(
+            message.chat.id,
+            _templates_menu_text(active_tpl),
+            parse_mode="HTML",
+            reply_markup=build_templates_menu_keyboard(active_tpl),
         )
 
     @bot_instance.message_handler(commands=["credits", "balance"])
@@ -534,6 +738,7 @@ def create_bot(
 
         st = database.get_stats()
         by_g = st["by_grade"]
+        by_t = st.get("by_template", {"classic": 0, "modern": 0})
         top_lines = []
         for idx, u in enumerate(st["top_users"], start=1):
             label = f"@{u['username']}" if u.get("username") else (u.get("first_name") or str(u["user_id"]))
@@ -549,7 +754,8 @@ def create_bot(
             f"👥 <b>Total Users:</b> {st['total_users']} (Active today: {st['active_today']})\n"
             f"📄 <b>Total Lesson Plans:</b> {st['total_generations']} (Today: {st['generations_today']})\n"
             f"🎟️ <b>Credits in Circulation:</b> {st['total_credits_remaining']}\n\n"
-            f"📚 <b>By Grade:</b> 3PS: {by_g['3PS']} | 4PS: {by_g['4PS']} | 5PS: {by_g['5PS']}\n\n"
+            f"📚 <b>By Grade:</b> 3PS: {by_g['3PS']} | 4PS: {by_g['4PS']} | 5PS: {by_g['5PS']}\n"
+            f"🎨 <b>By Template:</b> Classic: {by_t.get('classic', 0)} | Executive: {by_t.get('modern', 0)}\n\n"
             f"🏆 <b>Top Users:</b>\n{top_block}",
             parse_mode="HTML",
         )
@@ -668,13 +874,17 @@ def create_bot(
 
         if data in ("nav:grades", "nav:restart"):
             _safe_answer_cb(call)
+            user_row, _ = _sync_user(call.from_user, chat_id)
+            active_tpl = database.get_preferred_template(int(user_row["user_id"]))
             reset_session_state(chat_id)
-            if data == "nav:restart":
+            update_session_state(chat_id, template_id=active_tpl)
+            kb = build_grade_keyboard(active_tpl)
+            if data == "nav:restart" or getattr(call.message, "photo", None):
                 bot_instance.send_message(
                     chat_id,
                     _welcome_text(),
                     parse_mode="HTML",
-                    reply_markup=build_grade_keyboard(),
+                    reply_markup=kb,
                 )
             else:
                 bot_instance.edit_message_text(
@@ -682,8 +892,97 @@ def create_bot(
                     chat_id,
                     msg_id,
                     parse_mode="HTML",
-                    reply_markup=build_grade_keyboard(),
+                    reply_markup=kb,
                 )
+            return
+
+        if data == "nav:templates":
+            _safe_answer_cb(call)
+            user_row, _ = _sync_user(call.from_user, chat_id)
+            uid = int(user_row["user_id"])
+            state = get_session_state(chat_id)
+            active_tpl = _resolve_active_template(chat_id, call.from_user)
+            update_session_state(chat_id, template_id=active_tpl)
+            back_cb = "nav:topic" if (state.get("awaiting_topic") and state.get("session_id")) else "nav:grades"
+            text = _templates_menu_text(active_tpl)
+            kb = build_templates_menu_keyboard(active_tpl, back_callback=back_cb)
+            if getattr(call.message, "photo", None):
+                bot_instance.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            else:
+                bot_instance.edit_message_text(text, chat_id, msg_id, parse_mode="HTML", reply_markup=kb)
+            return
+
+        if data == "nav:topic":
+            _safe_answer_cb(call)
+            user_row, _ = _sync_user(call.from_user, chat_id)
+            active_tpl = _resolve_active_template(chat_id, call.from_user)
+            payload = _topic_step_payload(chat_id, active_tpl)
+            if payload is None:
+                kb = build_grade_keyboard(active_tpl)
+                if getattr(call.message, "photo", None):
+                    bot_instance.send_message(chat_id, _welcome_text(), parse_mode="HTML", reply_markup=kb)
+                else:
+                    bot_instance.edit_message_text(_welcome_text(), chat_id, msg_id, parse_mode="HTML", reply_markup=kb)
+                return
+            summary_text, topic_kb = payload
+            if getattr(call.message, "photo", None):
+                bot_instance.send_message(chat_id, summary_text, parse_mode="HTML", reply_markup=topic_kb)
+            else:
+                bot_instance.edit_message_text(summary_text, chat_id, msg_id, parse_mode="HTML", reply_markup=topic_kb)
+            return
+
+        if data.startswith("tpl:"):
+            tpl_id = data.split(":", 1)[1]
+            user_row, _ = _sync_user(call.from_user, chat_id)
+            uid = int(user_row["user_id"])
+            resolved = database.set_preferred_template(uid, tpl_id)
+            update_session_state(chat_id, template_id=resolved)
+            tpl_meta = get_template_meta(resolved)
+            _safe_answer_cb(call, f"Selected: {tpl_meta['short_name']}")
+
+            state = get_session_state(chat_id)
+            in_topic = bool(state.get("awaiting_topic") and state.get("session_id"))
+            back_cb = "nav:topic" if in_topic else "nav:grades"
+            if getattr(call.message, "photo", None):
+                try:
+                    bot_instance.edit_message_reply_markup(
+                        chat_id,
+                        msg_id,
+                        reply_markup=build_templates_menu_keyboard(resolved, back_callback=back_cb),
+                    )
+                except Exception:
+                    pass
+                return
+
+            payload = _topic_step_payload(chat_id, resolved) if in_topic else None
+            if payload is not None:
+                summary_text, topic_kb = payload
+                bot_instance.edit_message_text(
+                    summary_text,
+                    chat_id,
+                    msg_id,
+                    parse_mode="HTML",
+                    reply_markup=topic_kb,
+                )
+            else:
+                bot_instance.edit_message_text(
+                    _templates_menu_text(resolved),
+                    chat_id,
+                    msg_id,
+                    parse_mode="HTML",
+                    reply_markup=build_templates_menu_keyboard(resolved, back_callback=back_cb),
+                )
+            return
+
+        if data.startswith("preview:"):
+            kind = data.split(":", 1)[1].strip().lower()
+            _safe_answer_cb(call, "Sending visual preview...")
+            user_row, _ = _sync_user(call.from_user, chat_id)
+            active_tpl = _resolve_active_template(chat_id, call.from_user)
+            update_session_state(chat_id, template_id=active_tpl)
+            state = get_session_state(chat_id)
+            back_cb = "nav:topic" if (state.get("awaiting_topic") and state.get("session_id")) else "nav:grades"
+            _send_template_preview(chat_id, kind, active_tpl, back_cb)
             return
 
         if data.startswith("grade:"):
@@ -714,12 +1013,13 @@ def create_bot(
             state = get_session_state(chat_id)
             grade = state.get("grade")
             if not grade:
+                active_tpl = _resolve_active_template(chat_id, call.from_user)
                 bot_instance.edit_message_text(
                     _welcome_text(),
                     chat_id,
                     msg_id,
                     parse_mode="HTML",
-                    reply_markup=build_grade_keyboard(),
+                    reply_markup=build_grade_keyboard(active_tpl),
                 )
                 return
             meta = get_grade_meta(grade)
@@ -845,22 +1145,17 @@ def create_bot(
             update_session_state(chat_id, session_id=bp["id"], awaiting_topic=True)
             _safe_answer_cb(call, bp["short_title"])
 
-            vocab_preview = ", ".join(sec["key_vocabulary"][:6])
-            bot_instance.edit_message_text(
-                f"✅ <b>Selection Summary</b>\n"
-                f"• <b>Grade:</b> {html.escape(grade)}\n"
-                f"• <b>Sequence {seq['number']}:</b> {html.escape(seq['title'])}\n"
-                f"• <b>Section:</b> {html.escape(sec['title'])}\n"
-                f"• <b>Session:</b> {html.escape(bp['title'])}\n"
-                f"• <b>Key Lexis:</b> {html.escape(vocab_preview)}\n\n"
-                f"✍️ <b>Step 3: Reply with your specific Lesson Topic, Target Vocabulary, "
-                f"or Grammar structure</b> (e.g., <i>\"Rooms of the house &amp; Is there a...?\"</i>),\n"
-                f"or tap the button below to use the official syllabus focus directly:",
-                chat_id,
-                msg_id,
-                parse_mode="HTML",
-                reply_markup=build_topic_keyboard(),
-            )
+            active_tpl = _resolve_active_template(chat_id, call.from_user)
+            payload = _topic_step_payload(chat_id, active_tpl)
+            if payload is not None:
+                summary_text, topic_kb = payload
+                bot_instance.edit_message_text(
+                    summary_text,
+                    chat_id,
+                    msg_id,
+                    parse_mode="HTML",
+                    reply_markup=topic_kb,
+                )
             return
 
         if data == "topic:default":
@@ -888,10 +1183,11 @@ def create_bot(
             topic_text = (message.text or "").strip()
             _start_generation(chat_id, topic_text, from_user=message.from_user)
         else:
+            active_tpl = _resolve_active_template(chat_id, message.from_user)
             bot_instance.send_message(
                 chat_id,
                 "👋 Use /start or select your Grade Level below to generate a new lesson plan:",
-                reply_markup=build_grade_keyboard(),
+                reply_markup=build_grade_keyboard(active_tpl),
             )
 
     return bot_instance

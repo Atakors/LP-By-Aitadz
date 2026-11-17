@@ -343,7 +343,12 @@ def test_docx_a4_geometry_brand_palette_and_sections(tmp_path: Path, grade, seq_
 
 
 def test_inline_keyboards_callback_data_under_64_bytes():
-    for kb in [bot_module.build_grade_keyboard(), bot_module.build_topic_keyboard(), bot_module.build_post_generation_keyboard()]:
+    for kb in [
+        bot_module.build_grade_keyboard(),
+        bot_module.build_templates_menu_keyboard(),
+        bot_module.build_topic_keyboard(),
+        bot_module.build_post_generation_keyboard(),
+    ]:
         for row in kb.keyboard:
             for btn in row:
                 assert len(btn.callback_data.encode("utf-8")) <= 64
@@ -736,3 +741,329 @@ def test_install_resources_stages_have_detailed_activities(tmp_path: Path):
         assert len(doc.tables) == 6
         proc_cells = [row.cells[2].text for row in doc.tables[2].rows[1:-1]]
         assert any("Activity 1" in txt and "Activity 2" in txt for txt in proc_cells)
+
+
+# ---------------------------------------------------------------------------
+# 6. LESSON PLAN TEMPLATE SELECTOR & VISUAL PREVIEWS
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "grade,seq_id,sec_id,ses_id,topic,expected_total,expected_banner",
+    [
+        ("3PS", "3ps-seq-1", "3ps-s1-1", "3ps-listen-repeat", "Family Greetings", 60, "PRIMARY SCHOOL LESSON PLAN — 3 PS"),
+        ("4PS", "4ps-seq-2", "4ps-s2-1", "4ps-read-enjoy", "School Library", 60, "PRIMARY SCHOOL LESSON PLAN — 4 PS"),
+        ("5PS", "5ps-seq-1", "5ps-s1-1", "5ps-listen-interact", "Jobs & Occupations", 45, "PRIMARY SCHOOL LESSON PLAN — 5 PS"),
+    ],
+)
+def test_modern_executive_template_docx_structure_and_timings(
+    tmp_path: Path,
+    grade: str,
+    seq_id: str,
+    sec_id: str,
+    ses_id: str,
+    topic: str,
+    expected_total: int,
+    expected_banner: str,
+):
+    import re
+
+    plan = didactic_rules.build_default_lesson_plan(grade, seq_id, sec_id, ses_id, topic)
+    out_path = tmp_path / f"modern_{grade}_{ses_id}.docx"
+    saved = docx_builder.build_lesson_plan_docx(plan, output_path=str(out_path), template_id="modern")
+    assert Path(saved).exists()
+
+    doc = Document(saved)
+    sec = doc.sections[0]
+    assert sec.page_width.mm == pytest.approx(210.0, abs=1.0)
+    assert sec.page_height.mm == pytest.approx(297.0, abs=1.0)
+    assert sec.top_margin.mm == pytest.approx(12.7, abs=0.6)
+    assert sec.left_margin.mm == pytest.approx(12.7, abs=0.6)
+
+    assert len(doc.tables) == 6
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                all_text += "\n" + cell.text
+
+    assert expected_banner in all_text
+    for heading in (
+        "SESSION OBJECTIVES",
+        "SUBSIDIARY OBJECTIVES",
+        "ANTICIPATED PROBLEMS",
+        "SOLUTIONS",
+        "COMMUNICATION",
+        "COLLABORATION",
+        "CRITICAL THINKING",
+        "CREATIVITY",
+        "Presentation",
+        "Practice",
+        "Production",
+        "Time / VARK",
+        "What Worked Well?",
+        "What Hindered? / Action Points",
+    ):
+        assert heading in all_text
+
+    # Vertically merged "Installing resources" across Presentation, Practice, Production
+    exec_tbl = doc.tables[4]
+    assert len(exec_tbl.rows) == 6
+    assert exec_tbl.rows[2].cells[0]._tc is exec_tbl.rows[3].cells[0]._tc
+    assert exec_tbl.rows[3].cells[0]._tc is exec_tbl.rows[4].cells[0]._tc
+    assert "Installing" in exec_tbl.rows[2].cells[0].text
+
+    # Stage timing sum equals 60 mn (3PS/4PS) or 45 mn (5PS) and includes VARK letters
+    total_mn = 0
+    for row in exec_tbl.rows[1:]:
+        tv_txt = row.cells[4].text
+        m = re.search(r"(\d+)\s*mn", tv_txt)
+        assert m, f"Missing duration in Time / VARK cell: {tv_txt!r}"
+        total_mn += int(m.group(1))
+        assert any(tag in tv_txt for tag in ("V", "A", "R", "K"))
+    assert total_mn == expected_total
+
+    # Dashed borders in Objectives divider and Reflection boxes
+    assert 'w:val="dashed"' in doc.tables[2]._tbl.xml
+    assert 'w:val="dashed"' in doc.tables[5]._tbl.xml
+
+    # 3-part footer with PAGE / NUMPAGES fields
+    footer_para = sec.footer.paragraphs[0]
+    assert "Primary Education Standard Document" in footer_para.text
+    assert "Lesson Plan Template" in footer_para.text
+    footer_xml = sec.footer._element.xml
+    assert "PAGE" in footer_xml and "NUMPAGES" in footer_xml
+
+
+def test_template_previews_generate_valid_pngs():
+    from PIL import Image
+    import template_previews
+
+    template_previews.ensure_preview_assets(force=True)
+    assert set(template_previews.PREVIEW_PATHS.keys()) == {"classic", "modern", "both"}
+
+    for kind in ("classic", "modern", "both"):
+        p = Path(template_previews.get_preview_image_path(kind))
+        assert p.exists()
+        raw = p.read_bytes()
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+        with Image.open(p) as im:
+            w, h = im.size
+            assert w >= (1200 if kind == "both" else 600)
+            assert h >= 800
+
+
+def test_database_template_preference_and_migration(tmp_path: Path):
+    import sqlite3
+    from database import Database
+
+    # Legacy schema without preferred_template / template_id must migrate cleanly
+    legacy_db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(legacy_db_path)
+    conn.execute(
+        """
+        CREATE TABLE users (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            last_name TEXT DEFAULT '',
+            language_code TEXT DEFAULT '',
+            credits INTEGER NOT NULL DEFAULT 5,
+            total_generated INTEGER NOT NULL DEFAULT 0,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_banned INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_active_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE generations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            grade TEXT NOT NULL,
+            sequence_id TEXT NOT NULL,
+            section_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            credits_used INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Database(db_path=legacy_db_path, default_credits=5)
+    migrated.upsert_user(user_id=1001, chat_id=1001, first_name="Teacher")
+    assert migrated.get_preferred_template(1001) == "classic"
+    assert migrated.set_preferred_template(1001, "modern") == "modern"
+    assert migrated.get_preferred_template(1001) == "modern"
+
+    migrated.record_generation(
+        user_id=1001,
+        grade="5PS",
+        sequence_id="5ps-seq-1",
+        section_id="5ps-s1-1",
+        session_id="5ps-listen-interact",
+        topic="Jobs",
+        credits_used=1,
+        template_id="modern",
+    )
+    migrated.record_generation(
+        user_id=1001,
+        grade="3PS",
+        sequence_id="3ps-seq-1",
+        section_id="3ps-s1-1",
+        session_id="3ps-listen-repeat",
+        topic="Family",
+        credits_used=1,
+        template_id="classic",
+    )
+    stats = migrated.get_stats()
+    assert stats["by_template"] == {"classic": 1, "modern": 1}
+    migrated.close()
+
+
+def test_bot_template_selector_preview_and_modern_generation(monkeypatch, tmp_path: Path):
+    import io
+    from database import Database
+
+    bot_module._PREVIEW_FILE_IDS.clear()
+    test_token = "999888:ABC-DEF1234ghIkl-zyx57W2v1u123ew99"
+    test_db = Database(db_path=str(tmp_path / "tpl_bot.db"), default_credits=5)
+    offline_mcp = CloudflareMCPClient(portal_url="", cf_client_id="", cf_client_secret="")
+    test_bot = bot_module.create_bot(
+        token=test_token,
+        mcp_client_factory=lambda: offline_mcp,
+        async_dispatch=False,
+        db=test_db,
+    )
+
+    sent_messages = []
+    edited_messages = []
+    sent_photos = []
+    sent_docs = []
+
+    monkeypatch.setattr(
+        test_bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: (
+            sent_messages.append((chat_id, text, kwargs)),
+            SimpleNamespace(message_id=len(sent_messages)),
+        )[1],
+    )
+    monkeypatch.setattr(
+        test_bot,
+        "edit_message_text",
+        lambda text, chat_id, msg_id, **kwargs: edited_messages.append((chat_id, msg_id, text, kwargs)),
+    )
+    monkeypatch.setattr(test_bot, "answer_callback_query", lambda cb_id, text=None: True)
+    monkeypatch.setattr(test_bot, "delete_message", lambda chat_id, msg_id: True)
+
+    def capture_photo(chat_id, photo, **kwargs):
+        if isinstance(photo, str):
+            sent_photos.append(("file_id", photo, kwargs))
+        else:
+            sent_photos.append(("bytes", photo.read()[:8], kwargs))
+        return SimpleNamespace(
+            message_id=200 + len(sent_photos),
+            photo=[SimpleNamespace(file_id="cached-preview-both")],
+        )
+
+    monkeypatch.setattr(test_bot, "send_photo", capture_photo)
+    monkeypatch.setattr(
+        test_bot,
+        "send_document",
+        lambda chat_id, document, visible_file_name=None, **kwargs: sent_docs.append(
+            (chat_id, visible_file_name, document.read(), kwargs.get("caption", ""))
+        ),
+    )
+
+    chat_id = 888002
+    # 1. /templates command opens template menu
+    test_bot.process_new_updates([
+        bot_module.telebot.types.Update.de_json(
+            {
+                "update_id": 100,
+                "message": {
+                    "message_id": 1,
+                    "date": 1700000000,
+                    "chat": {"id": chat_id, "type": "private"},
+                    "from": {"id": chat_id, "is_bot": False, "first_name": "Nadia"},
+                    "text": "/templates",
+                },
+            }
+        )
+    ])
+    assert "Template Selector" in sent_messages[-1][1]
+
+    # 2. Preview comparison sends PNG first, then reuses cached file_id
+    def make_cb(uid_num: int, data: str):
+        return bot_module.telebot.types.Update.de_json(
+            {
+                "update_id": uid_num,
+                "callback_query": {
+                    "id": f"cb-{uid_num}",
+                    "from": {"id": chat_id, "is_bot": False, "first_name": "Nadia"},
+                    "message": {
+                        "message_id": 1,
+                        "date": 1700000001,
+                        "chat": {"id": chat_id, "type": "private"},
+                        "text": "menu",
+                    },
+                    "chat_instance": "inst",
+                    "data": data,
+                },
+            }
+        )
+
+    test_bot.process_new_updates([make_cb(101, "preview:both")])
+    assert sent_photos[0][0] == "bytes"
+    assert sent_photos[0][1] == b"\x89PNG\r\n\x1a\n"
+
+    test_bot.process_new_updates([make_cb(102, "preview:both")])
+    assert sent_photos[1][0] == "file_id"
+    assert sent_photos[1][1] == "cached-preview-both"
+
+    # 3. Select modern template and verify DB persistence across /start reset
+    test_bot.process_new_updates([make_cb(103, "tpl:modern")])
+    assert test_db.get_preferred_template(chat_id) == "modern"
+
+    test_bot.process_new_updates([
+        bot_module.telebot.types.Update.de_json(
+            {
+                "update_id": 104,
+                "message": {
+                    "message_id": 2,
+                    "date": 1700000002,
+                    "chat": {"id": chat_id, "type": "private"},
+                    "from": {"id": chat_id, "is_bot": False, "first_name": "Nadia"},
+                    "text": "/start",
+                },
+            }
+        )
+    ])
+    assert "Executive Standard (4Cs &amp; VARK)" in sent_messages[-1][1]
+
+    # 4. Run wizard to generate DOCX with the selected modern template
+    for uid_num, cb in enumerate(
+        ["grade:5PS", "seq:5ps-seq-1", "sec:5ps-s1-1", "ses:5ps-listen-interact", "topic:default"],
+        start=105,
+    ):
+        test_bot.process_new_updates([make_cb(uid_num, cb)])
+
+    assert len(sent_docs) == 1
+    doc_bytes = sent_docs[0][2]
+    caption = sent_docs[0][3]
+    assert doc_bytes[:2] == b"PK"
+    assert "Executive Standard (4Cs &amp; VARK)" in caption
+
+    generated_doc = Document(io.BytesIO(doc_bytes))
+    assert "PRIMARY SCHOOL LESSON PLAN — 5 PS" in generated_doc.tables[0].rows[0].cells[0].text
+    assert test_db.get_stats()["by_template"]["modern"] == 1
+
+    bot_module._PREVIEW_FILE_IDS.clear()
+    test_db.close()
