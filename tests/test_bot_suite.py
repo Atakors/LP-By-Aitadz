@@ -1234,3 +1234,141 @@ def test_docx_builder_strips_xml_control_chars_and_normalizer_accepts_list_proce
         saved = docx_builder.build_lesson_plan_docx(plan, output_path=str(out), template_id=tpl_id)
         doc = Document(saved)
         assert len(doc.tables) == 6
+
+
+def test_normalizer_fixes_llm_5ps_read_discover_defects():
+    llm_raw_output = {
+        "header": {
+            "level": "5PS",
+            "class_profile": "5PS - Year 5 Primary (Key Stage 3)",
+            "number_of_learners": "30",
+            "domains": "English Language",
+            "session_objectives": (
+                "By the end of the session, learners will be able to identify and name different hobbies "
+                "and family members' favourite hobbies, and ask and answer questions about favourite hobbies"
+            ),
+            "subsidiary_objectives": (
+                "Learners will be able to use present simple sentences to talk about hobbies "
+                "and use prepositions to describe when and where they do their hobbies"
+            ),
+            "core_values": "Respect, Responsibility, and Creativity",
+            "cross_curricular_competencies": "Communication, Teamwork, and Problem-solving",
+            "anticipated_problems": "Learners may struggle with pronunciation of /ŋ/ sound or using prepositions correctly",
+        },
+        "stages": [
+            {
+                "minutes": 5,
+                "stage": "Warm-up (Warmer)",
+                "procedure": (
+                    "Activity 1 (Phonics Fun): T shows learners topical word cards.\n"
+                    "Activity 2 (Word Building): Magnetic letters.\n"
+                    "Activity 3 (Sound Scavenger Hunt): T hides word cards around the classroom."
+                ),
+                "interaction": "T-Ls",
+                "competency_materials": "Phonics / Written Comp. | Topical word cards",
+            },
+            {
+                "minutes": 10,
+                "stage": "Presentation / Discovery (Install Resources)",
+                "procedure": (
+                    "Activity 1 (Text Review): T briefly reviews the 'I Read and Understand' text.\n"
+                    "Activity 2 (Question Cards): T uses question cards (who/what/where/when) to help learners "
+                    "notice word boundaries, word order, SV agreement, and punctuation.\n"
+                    "Activity 3 (Reading Comprehension): Learners read the text again."
+                ),
+                "interaction": "T-Ls / Ls-T",
+                "competency_materials": "Written Comprehension | Reading text, question cards",
+            },
+            {
+                "minutes": 15,
+                "stage": "Mechanical Practice — Controlled & Guided (Install Resources)",
+                "procedure": (
+                    "Activity 1 (Picture-Prompt Drilling): T shows learners pictures related to hobbies.\n"
+                    "Activity 2 (Gap-Fill): Learners complete gap-fill sentences.\n"
+                    "Activity 3 (Anagram Sentences): Learners unscramble sentences related to hobbies."
+                ),
+                "interaction": "Individual / Pair / Group",
+                "competency_materials": "Written / Oral Practice | Anagram cards, gap-fill board",
+            },
+            {
+                "minutes": 10,
+                "stage": "Communicative Practice / Assessment (Assessment)",
+                "procedure": (
+                    "Activity 1 (Info-Gap): Learners complete info-gap tasks.\n"
+                    "Activity 2 (Role-Play): Learners role-play conversations."
+                ),
+                "interaction": "Pair / Group",
+                "competency_materials": "Oral / Written Practice | Info-gap cards, star chart",
+            },
+            {
+                "minutes": 5,
+                "stage": "Feedback / Exit Ticket (Assessment)",
+                "procedure": "Activity 1 (Exit Ticket): Learners unscramble one short sentence on their slate.",
+                "interaction": "Individual / T-Ls",
+                "competency_materials": "Formative Assessment | Slates, Exit Ticket",
+            },
+        ],
+        "whiteboard_layout": {
+            "left_panel": "Date, Sequence/Section/Session, Visual Flashcards & Target Vocabulary",
+            "center_panel": "Core Model Chunks / Text / Form / Phonics / Line Guides",
+            "right_panel": "Classroom Star & Team Points Tracker + Learner Slate Practice",
+        },
+        "self_reflection": {
+            "what_worked": "The phonics fun activity and the info-gap task were particularly effective.",
+            "what_hindered": "Some learners struggled with the pronunciation of the /ŋ/ sound.",
+            "action_plan": "Provide extra support and practice.",
+        },
+    }
+
+    normalized = didactic_rules.validate_and_normalize_lesson_plan(
+        llm_raw_output,
+        grade="5PS",
+        sequence_id="5ps-seq-1",
+        section_id="5ps-s1-2",
+        session_id="5ps-read-discover",
+        topic="Hobbies",
+    )
+
+    # 1. Canonical Ministry header fields are pinned
+    hdr = normalized["header"]
+    assert hdr["level"] == "5PS - Year 5 Primary (Key Stage 3)"
+    assert hdr["class_profile"] == "5PS Primary Class"
+    assert hdr["number_of_learners"] == "[To be completed by teacher]"
+    assert hdr["domains"] == "Written Comprehension / Oral Production"
+    assert "National Identity" in hdr["core_values"]
+    assert "Intellectual" in hdr["cross_curricular_competencies"]
+
+    # 2. Explicit grammar metalanguage is scrubbed everywhere
+    serialized_lower = json.dumps(normalized).lower()
+    for grammar_term in ("present simple", "preposition", "prepositions", "sv agreement"):
+        assert grammar_term not in serialized_lower, f"Leaked grammar term {grammar_term!r}"
+
+    # 3. 5-minute Warmer no longer contains a classroom scavenger hunt
+    assert "scavenger hunt" not in normalized["stages"][0]["procedure"].lower()
+
+    # 4. Stages 2, 3, and 4 automatically include concrete Reading Text, Question Cards, Tasks & Answer Key
+    st2_proc = normalized["stages"][1]["procedure"]
+    assert "Reading Text:" in st2_proc
+    assert "Question Cards:" in st2_proc
+    assert "T:" in st2_proc
+
+    st3_proc = normalized["stages"][2]["procedure"]
+    assert "Task 1 (Gap-Fill):" in st3_proc
+    assert "Task 2 (Anagrams):" in st3_proc
+    assert "Answer Key:" in st3_proc
+
+    st4_proc = normalized["stages"][3]["procedure"]
+    assert "Model Form:" in st4_proc
+    assert "T:" in st4_proc
+
+    # 5. Whiteboard layout rejects echoed schema placeholders and contains concrete topic content
+    wb = normalized["whiteboard_layout"]
+    assert "Date, Sequence/Section/Session" not in wb["left_panel"]
+    assert "Core Model Chunks / Text / Form" not in wb["center_panel"]
+    assert "Hobbies" in wb["left_panel"]
+
+    # 6. Self-reflection is pinned to teacher post-lesson placeholders
+    sr = normalized["self_reflection"]
+    assert sr["what_worked"] == "[To be completed by teacher after session]"
+    assert sr["what_hindered"] == "[To be completed by teacher after session]"
+    assert sr["action_plan"] == "[To be completed by teacher after session]"

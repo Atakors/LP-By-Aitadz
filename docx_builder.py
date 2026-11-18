@@ -261,7 +261,7 @@ _RICH_PREFIX_RE = re.compile(
     r"|Task\s+\d+(?:\s*\([^)]+\))?"
     r"|Phase\s+\d+(?:\s*\([^)]+\))?"
     r"|Step\s+\d+(?:\s*\([^)]+\))?"
-    r"|Listening\s+Script|Reading\s+Text|Listening\s*/\s*Reading\s+Model"
+    r"|Listening\s+Script|Reading\s+Text|Listening\s*/\s*Reading\s+Model|Question\s+Cards"
     r"|Model\s+Form|Practice\s+Form|Model\s+Message|Word\s+Bank|Answer\s+Key|Game\s+Rules"
     r"|Target\s+Lexis(?:\s*&\s*Chunks)?|Model\s+Chunks\s*/\s*Prompts|Phonics\s*/\s*Mechanics"
     r"|Model\s+Text\s*/\s*Task|Flashcards\s*&\s*Lexis|Classroom\s+Reward\s+Board"

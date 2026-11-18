@@ -258,7 +258,18 @@ function scrubMetaTerms(text) {
     .replace(/\bscan\b/gi, "look carefully for specific details")
     .replace(/\bgist\b/gi, "overall idea")
     .replace(/\bpredictions\b/gi, "initial guesses")
-    .replace(/\bprediction\b/gi, "initial guess");
+    .replace(/\bprediction\b/gi, "initial guess")
+    .replace(/\bSV\s+agreement\b/gi, "subject-action word matching")
+    .replace(/\bsubject[-\s]+verb\s+agreement\b/gi, "subject-action word matching")
+    .replace(/\bsubject[-\s]+verb\s+patterns?\b/gi, "chunk and word-order patterns")
+    .replace(/\bpresent\s+simple(?:\s+tense)?\b/gi, "target action chunks")
+    .replace(/\bsimple\s+present(?:\s+tense)?\b/gi, "target action chunks")
+    .replace(/\bpresent\s+continuous(?:\s+tense)?\b/gi, "ongoing action chunks (-ing)")
+    .replace(/\bpresent\s+progressive(?:\s+tense)?\b/gi, "ongoing action chunks (-ing)")
+    .replace(/\bprepositions?(?:\s+of\s+(?:place|location|time|movement))?\b/gi, "location and time words (in, on, at)")
+    .replace(/\bpossessive\s+adjectives?\b/gi, "ownership words (my, your, his, her)")
+    .replace(/\b(?:personal|subject)\s+pronouns?\b/gi, "person words (I, you, he, she)")
+    .replace(/\bimperatives?\b/gi, "action instructions");
 }
 
 function sanitizeNonMonetary(text) {
@@ -429,6 +440,28 @@ function buildBaselineStages(args, targetMinutes) {
   ];
 }
 
+function resolveOfficialDomains(sessionText, rawDomains) {
+  const cleaned = String(rawDomains || "").trim();
+  if (/comprehension|production/i.test(cleaned)) {
+    return cleaned;
+  }
+  const s = String(sessionText || "").toLowerCase();
+  if (s.includes("write")) return "Written Comprehension / Written Production";
+  if (s.includes("read")) return "Written Comprehension / Oral Production";
+  return "Oral Comprehension / Oral Production";
+}
+
+function isGenericWhiteboardPanel(text) {
+  const low = String(text || "").trim().toLowerCase();
+  if (low.length < 20) return true;
+  return (
+    low.includes("date, sequence/section/session") ||
+    low.includes("visual flashcards & target vocabulary") ||
+    low.includes("core model chunks / text / form") ||
+    low.includes("classroom star & team points tracker + learner slate practice")
+  );
+}
+
 export function normalizePlan(rawPlan, args = {}, targetMinutes = null) {
   const grade = normalizeGrade(args.grade);
   const guide = LEVEL_GUIDELINES[grade];
@@ -437,46 +470,53 @@ export function normalizePlan(rawPlan, args = {}, targetMinutes = null) {
   const baselineStages = buildBaselineStages(args, expectedMinutes);
 
   const rawHeader = rawPlan?.header && typeof rawPlan.header === "object" ? rawPlan.header : {};
+  const sessionLabel = String(args.session || rawHeader.session || "Lesson Session");
   const header = {
-    class_profile: String(rawHeader.class_profile || `${grade} Primary Class`),
-    level: String(rawHeader.level || guide.level),
-    number_of_learners: String(rawHeader.number_of_learners || "[To be completed by teacher]"),
+    class_profile: `${grade} Primary Class`,
+    level: guide.level,
+    number_of_learners: "[To be completed by teacher]",
     duration: `${expectedMinutes} mn`,
-    sequence: String(rawHeader.sequence || args.sequence || "Sequence 1"),
-    section: String(rawHeader.section || args.section || "Section 1"),
-    session: String(rawHeader.session || args.session || "Lesson Session"),
-    domains: String(rawHeader.domains || "Oral Comprehension / Oral Production"),
-    target_competence: String(
-      rawHeader.target_competence ||
-        `Comprehend and interact using simple language related to ${topic}.`
+    sequence: String(args.sequence || rawHeader.sequence || "Sequence 1"),
+    section: String(args.section || rawHeader.section || "Section 1"),
+    session: sessionLabel,
+    domains: resolveOfficialDomains(sessionLabel, rawHeader.domains),
+    target_competence: scrubMetaTerms(
+      String(
+        rawHeader.target_competence ||
+          `Comprehend and interact using simple language related to ${topic}.`
+      )
     ),
-    session_objectives: ensureObjectiveFormula(rawHeader.session_objectives, topic),
-    subsidiary_objectives: String(
-      rawHeader.subsidiary_objectives ||
-        `Practice target phonics (${args?.didactic_schema?.phonics_target || "level phonics"}) and handwriting mechanics implicitly.`
+    session_objectives: scrubMetaTerms(ensureObjectiveFormula(rawHeader.session_objectives, topic)),
+    subsidiary_objectives: scrubMetaTerms(
+      String(
+        rawHeader.subsidiary_objectives ||
+          `Practice target phonics (${args?.didactic_schema?.phonics_target || "level phonics"}) and handwriting mechanics implicitly.`
+      )
     ),
-    phonics_focus: String(
-      rawHeader.phonics_focus || args?.didactic_schema?.phonics_target || "Level phonics target"
+    phonics_focus: scrubMetaTerms(
+      String(
+        args?.didactic_schema?.phonics_target || rawHeader.phonics_focus || "Level phonics target"
+      )
     ),
-    core_values: String(
-      rawHeader.core_values ||
-        "National Identity, National Conscience, Citizenship, Openness to the World"
-    ),
-    cross_curricular_competencies: String(
-      rawHeader.cross_curricular_competencies ||
-        "Intellectual, Methodological, Communicative, Personal and Social"
-    ),
+    core_values:
+      "National Identity, National Conscience, Citizenship, Openness to the World",
+    cross_curricular_competencies:
+      "Intellectual, Methodological, Communicative, Personal and Social",
     teaching_materials: sanitizeNonMonetary(
       String(
         rawHeader.teaching_materials ||
           `Flashcards (${topic}), realia, audio/song, whiteboard, slates, Gold Stars & Explorer Badges`
       )
     ),
-    anticipated_problems: String(
-      rawHeader.anticipated_problems || "Shyness during oral turns or L1 interference."
+    anticipated_problems: scrubMetaTerms(
+      String(
+        rawHeader.anticipated_problems || "Shyness during oral turns or L1 interference."
+      )
     ),
-    solutions_plan_b: String(
-      rawHeader.solutions_plan_b || "Use choral drilling, visual prompts, and Think-Pair-Share."
+    solutions_plan_b: scrubMetaTerms(
+      String(
+        rawHeader.solutions_plan_b || "Use choral drilling, visual prompts, and Think-Pair-Share."
+      )
     ),
   };
 
@@ -502,18 +542,25 @@ export function normalizePlan(rawPlan, args = {}, targetMinutes = null) {
     }
   }
 
-  stages = stages.map((st, i) => ({
-    minutes: mins[i],
-    time: `${mins[i]} mn`,
-    stage: String(st.stage || baselineStages[i]?.stage || `Stage ${i + 1}`),
-    procedure: sanitizeNonMonetary(
-      scrubMetaTerms(st.procedure || st.procedure_tasks || baselineStages[i]?.procedure || "")
-    ),
-    interaction: String(st.interaction || baselineStages[i]?.interaction || "T-Ls"),
-    competency_materials: sanitizeNonMonetary(
-      String(st.competency_materials || baselineStages[i]?.competency_materials || "Flashcards")
-    ),
-  }));
+  stages = stages.map((st, i) => {
+    const bpProc = baselineStages[i]?.procedure || "";
+    let proc = sanitizeNonMonetary(
+      scrubMetaTerms(st.procedure || st.procedure_tasks || bpProc)
+    );
+    if (i === 0 && mins[i] <= 5 && /scavenger hunt/i.test(proc) && bpProc) {
+      proc = bpProc;
+    }
+    return {
+      minutes: mins[i],
+      time: `${mins[i]} mn`,
+      stage: String(st.stage || baselineStages[i]?.stage || `Stage ${i + 1}`),
+      procedure: proc,
+      interaction: String(st.interaction || baselineStages[i]?.interaction || "T-Ls"),
+      competency_materials: sanitizeNonMonetary(
+        String(st.competency_materials || baselineStages[i]?.competency_materials || "Flashcards")
+      ),
+    };
+  });
 
   const rawGam = rawPlan?.gamification && typeof rawPlan.gamification === "object"
     ? rawPlan.gamification
@@ -534,22 +581,23 @@ export function normalizePlan(rawPlan, args = {}, targetMinutes = null) {
   const rawWb = rawPlan?.whiteboard_layout && typeof rawPlan.whiteboard_layout === "object"
     ? rawPlan.whiteboard_layout
     : {};
+  const defaultLeft = `Date: [Day, Date]\n${header.sequence} | ${header.section}\nTopic: ${topic}\nFlashcards & Vocabulary`;
+  const defaultCenter = `Session: ${header.session}\nPhonics & Chunks: ${header.phonics_focus}`;
+  const defaultRight = "Classroom Star Board:\nTeam A ★ ★ ★ | Team B ★ ★ ★\nLearner Slate Practice Zone";
   const whiteboard_layout = {
     left_panel: sanitizeNonMonetary(
       scrubMetaTerms(
-        rawWb.left_panel ||
-          `Date: [Day, Date]\n${header.sequence}\n${header.section}\nTopic: ${topic}`
+        !isGenericWhiteboardPanel(rawWb.left_panel) ? rawWb.left_panel : defaultLeft
       )
     ),
     center_panel: sanitizeNonMonetary(
       scrubMetaTerms(
-        rawWb.center_panel || `Session: ${header.session}\nPhonics: ${header.phonics_focus}`
+        !isGenericWhiteboardPanel(rawWb.center_panel) ? rawWb.center_panel : defaultCenter
       )
     ),
     right_panel: sanitizeNonMonetary(
       scrubMetaTerms(
-        rawWb.right_panel ||
-          "Classroom Star Board:\nTeam A ★ ★ ★ | Team B ★ ★ ★\nLearner Slate Practice Zone"
+        !isGenericWhiteboardPanel(rawWb.right_panel) ? rawWb.right_panel : defaultRight
       )
     ),
   };
@@ -561,13 +609,10 @@ export function normalizePlan(rawPlan, args = {}, targetMinutes = null) {
     )
   );
 
-  const rawSr = rawPlan?.self_reflection && typeof rawPlan.self_reflection === "object"
-    ? rawPlan.self_reflection
-    : {};
   const self_reflection = {
-    what_worked: String(rawSr.what_worked || "[To be completed by teacher after session]"),
-    what_hindered: String(rawSr.what_hindered || "[To be completed by teacher after session]"),
-    action_plan: String(rawSr.action_plan || "[To be completed by teacher after session]"),
+    what_worked: "[To be completed by teacher after session]",
+    what_hindered: "[To be completed by teacher after session]",
+    action_plan: "[To be completed by teacher after session]",
   };
 
   return {

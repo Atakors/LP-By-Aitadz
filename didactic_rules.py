@@ -334,6 +334,17 @@ META_TERM_REPLACEMENTS: List[Tuple[str, str]] = [
     (r"\bgist\b", "overall idea"),
     (r"\bpredictions\b", "initial guesses"),
     (r"\bprediction\b", "initial guess"),
+    (r"\bSV\s+agreement\b", "subject-action word matching"),
+    (r"\bsubject[-\s]+verb\s+agreement\b", "subject-action word matching"),
+    (r"\bsubject[-\s]+verb\s+patterns?\b", "chunk and word-order patterns"),
+    (r"\bpresent\s+simple(?:\s+tense)?\b", "target action chunks"),
+    (r"\bsimple\s+present(?:\s+tense)?\b", "target action chunks"),
+    (r"\bpresent\s+continuous(?:\s+tense)?\b", "ongoing action chunks (-ing)"),
+    (r"\bpresent\s+progressive(?:\s+tense)?\b", "ongoing action chunks (-ing)"),
+    (r"\bprepositions?(?:\s+of\s+(?:place|location|time|movement))?\b", "location and time words (in, on, at)"),
+    (r"\bpossessive\s+adjectives?\b", "ownership words (my, your, his, her)"),
+    (r"\b(?:personal|subject)\s+pronouns?\b", "person words (I, you, he, she)"),
+    (r"\bimperatives?\b", "action instructions"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1764,7 +1775,7 @@ SESSION_BLUEPRINTS: Dict[str, List[Dict[str, Any]]] = {
                     "stage": "Stage 2: Presentation / Discovery (Install Resources)",
                     "procedure": (
                         "Briefly review the 'I Read and Understand' text; use leading questions and question cards "
-                        "(who/what/where/when) so learners notice word boundaries, word order, SV agreement, "
+                        "(who/what/where/when) so learners notice word boundaries, word order, subject-action word matching, "
                         "and punctuation IMPLICITLY (no grammar labels)."
                     ),
                     "interaction": "T-Ls / Ls-T",
@@ -2160,6 +2171,64 @@ def _parse_minutes(time_value: Any, default_minutes: int) -> int:
     return default_minutes
 
 
+_CONCRETE_MATERIAL_PREFIXES: Tuple[str, ...] = (
+    "Listening Script:",
+    "Reading Text:",
+    "Question Cards:",
+    "Model Form:",
+    "Practice Form:",
+    "Word Bank:",
+    "Model Message:",
+    "Task 1",
+    "Task 2",
+    "Game Rules:",
+    "Answer Key:",
+    "Sample Prompt Material",
+    "Target Lexis & Chunks:",
+)
+
+
+def _enrich_stage_procedure(
+    proc_clean: str,
+    bp_proc: str,
+    mins: int,
+    is_warmer: bool = False,
+) -> str:
+    """
+    Ensure LLM-generated stage procedures contain concrete classroom materials
+    (scripts, reading texts, question cards, forms, tasks, answer keys, and T:/Ls:
+    micro-interactions) and keep 5-minute warmers realistic.
+    """
+    if not proc_clean:
+        return bp_proc
+    low = proc_clean.lower()
+    if is_warmer and mins <= 5 and ("scavenger hunt" in low or "activity 3" in low):
+        return bp_proc
+
+    missing_lines: List[str] = []
+    for bp_line in bp_proc.splitlines():
+        stripped = bp_line.strip()
+        if not stripped:
+            continue
+        for prefix in _CONCRETE_MATERIAL_PREFIXES:
+            if stripped.lower().startswith(prefix.lower()):
+                check_token = prefix.lower()
+                if check_token not in low:
+                    missing_lines.append(stripped)
+                break
+
+    has_dialogue = ("t:" in low and "ls:" in low) or ('t: "' in low)
+    if not has_dialogue:
+        for bp_line in bp_proc.splitlines():
+            stripped = bp_line.strip()
+            if (stripped.startswith("T:") or stripped.startswith("Ls:") or 'T: "' in stripped) and stripped not in missing_lines:
+                missing_lines.append(stripped)
+
+    if not missing_lines:
+        return proc_clean
+    return proc_clean.rstrip() + "\n" + "\n".join(missing_lines)
+
+
 def _reconcile_stage_timings(
     stages: List[Dict[str, Any]],
     blueprint_stages: List[Dict[str, Any]],
@@ -2202,6 +2271,13 @@ def _reconcile_stage_timings(
         raw_proc = st.get("procedure") if st.get("procedure") is not None else st.get("procedure_tasks")
         proc_raw = _coerce_text_field(raw_proc) or bp_st["procedure"]
         proc_clean = sanitize_non_monetary_gamification(scrub_learner_meta_terms(proc_raw))
+        is_warmer = idx == 0 or "warm" in stage_name.lower() or "warmer" in stage_name.lower()
+        proc_enriched = _enrich_stage_procedure(
+            proc_clean,
+            bp_st["procedure"],
+            mins=mins,
+            is_warmer=is_warmer,
+        )
         interaction = _coerce_text_field(st.get("interaction")) or bp_st["interaction"]
         comp_raw = _coerce_text_field(st.get("competency_materials")) or bp_st["competency_materials"]
         comp_mat = sanitize_non_monetary_gamification(comp_raw)
@@ -2210,7 +2286,7 @@ def _reconcile_stage_timings(
                 "minutes": mins,
                 "time": f"{mins} mn",
                 "stage": stage_name,
-                "procedure": proc_clean,
+                "procedure": proc_enriched,
                 "interaction": interaction,
                 "competency_materials": comp_mat,
             }
@@ -2315,7 +2391,7 @@ def _build_rich_stage_procedure(
     w3 = items[2] if len(items) > 2 else w2
     w4 = items[3] if len(items) > 3 else w1
     vocab_preview = ", ".join(items[:6])
-    grammar_preview = "; ".join(sec.get("implicit_grammar", []))
+    grammar_preview = scrub_learner_meta_terms("; ".join(sec.get("implicit_grammar", [])))
     phonics_target = sec.get("phonics_target", "target sounds")
     script = _build_listening_script(grade, sec, clean_topic, items)
     passage = _build_reading_passage(grade, sec, clean_topic, items)
@@ -2490,7 +2566,7 @@ def _build_rich_stage_procedure(
                 f"Activity 1 (Listening Script Recall): Re-read 2 key lines from:\n"
                 f"Listening Script: {script}\n"
                 f"Activity 2 (Oral Leading Questions — Implicit Discovery): Ask Who/What/Where questions so pupils notice word order "
-                f"and subject-verb patterns ({grammar_preview}) implicitly — NEVER use grammatical terminology."
+                f"and chunk patterns ({grammar_preview}) implicitly — NEVER use grammatical terminology."
             )
         if "stage 3" in stage_lower:
             return (
@@ -2539,20 +2615,26 @@ def _build_rich_stage_procedure(
     if bp_id == "5ps-read-discover":
         if "stage 2" in stage_lower:
             return (
-                f"Activity 1 (Reading Text Recall & Question Cards): Display '{passage}' with Who / What / Where / When question cards.\n"
-                f'T: "Look at the Who and What cards! Which word comes first in the sentence?" | Ls: Point to board chunks.\n'
-                f"Activity 2 (Implicit Pattern Noticing): Highlight word boundaries, capital letters, punctuation, and '{grammar_preview}' via leading questions (no grammar rules)."
+                f"Activity 1 (Reading Text Recall): Display the short text on the center board:\n"
+                f'Reading Text: "{passage}"\n'
+                f"Activity 2 (Question Cards — Implicit Discovery): Use 4 Question Cards to highlight word boundaries, capital letters, punctuation, and '{grammar_preview}' implicitly (zero grammar labels):\n"
+                f'Question Cards: 1) Who is in the text? -> "Yacine and Lina." | 2) What do they enjoy? -> "{w1} and {w4}." | 3) Where/When? -> "At the weekend."\n'
+                f'T: "Look at Card 1 and Card 2! Which word comes first? How does the action word change?" | Ls: Point to board chunks and answer orally.'
             )
         if "stage 3" in stage_lower:
             return (
                 f"Activity 1 (Phase 1 Controlled — Picture-Prompt Drilling): Show flashcards ({w1}, {w2}, {w3}); teams produce accurate full-sentence responses.\n"
-                f"Activity 2 (Phase 2 Guided — Gap-Fill & Sentence Anagram): Groups complete 2 gap-fill sentences and unscramble 2 word-card anagrams:\n"
-                f"Task 1: 1) I / {w1} / like / .   2) Look / {w2} / at / !   | Answer Key: 1) I like {w1}.  2) Look at {w2}!"
+                f'T: "Look at the card! Say the full sentence together!" | Ls: "I like {w1}! My friend enjoys {w2}!"\n'
+                f"Activity 2 (Phase 2 Guided — Gap-Fill & Sentence Anagrams): Groups complete 2 gap-fill sentences and unscramble 2 word-card anagrams:\n"
+                f"Task 1 (Gap-Fill): 1) I like ________ ({w1}) on Saturday.   2) Lina enjoys ________ ({w2}) at the weekend.\n"
+                f"Task 2 (Anagrams): 1) I / {w1} / like / .   2) Look / {w2} / at / !\n"
+                f"Answer Key: Gap-Fill: 1) {w1}  2) {w2} | Anagrams: 1) I like {w1}.  2) Look at {w2}!"
             )
         if "stage 4" in stage_lower:
             return (
-                f"Activity 1 (Info-Gap & Role-Play): Pairs complete missing details on two split cue cards using target questions.\n"
-                f'T: "Ask your partner to fill in the missing card item!" | Ls: Exchange questions and answers in pairs.\n'
+                f"Activity 1 (Info-Gap & Role-Play): Pairs complete missing details on two split cue cards using target questions:\n"
+                f"Model Form: Card A [ Yacine: {w1} (Saturday) | Lina: ________ ] <-> Card B [ Yacine: ________ | Lina: {w2} (Friday) ]\n"
+                f'T: "Ask your partner to fill in the missing card item!" | Ls: "What does Lina enjoy?" -> "She enjoys {w2} on Friday!"\n'
                 f"Activity 2 (Immediate Feedback Against Fossilization): Teacher circulates with gentle recasts and awards Team Points."
             )
 
@@ -2670,7 +2752,11 @@ def build_system_prompt(
         "  * For Reading stages: include the verbatim level-calibrated Reading Text (~20-40 words) + phonics decoding words (segmentation/blending) + concrete comprehension tasks + Answer Key.\n"
         "  * For Writing stages: include exact letter formation families / model 4-field Form + Word Bank + Model Message + proofreading checklist.\n"
         "  * For Games / Role-Play stages: include explicit Game Rules, 4 concrete sample items/anagrams/cue cards, and Answer Key.\n"
-        "- Include explicit 'T:' (Teacher script/prompts) and 'Ls:' (Expected learner actions/answers) inside stages.\n\n"
+        "- Include explicit 'T:' (Teacher script/prompts) and 'Ls:' (Expected learner actions/answers) inside stages.\n"
+        "- For 5-minute Warm-up stages, include 1 to 2 brisk flashcard/phonics starter tasks (never classroom scavenger hunts or multi-step crafts).\n"
+        "- NEVER use explicit grammar metalanguage ('present simple', 'prepositions', 'SV agreement') in objectives or procedures; refer to target language chunks and word order implicitly.\n"
+        "- In 'whiteboard_layout', write concrete topic vocabulary, model sentences, and phonics words (NEVER copy schema description placeholders).\n"
+        "- In 'self_reflection', always output '[To be completed by teacher after session]' (never invent past-tense reflections before the lesson is taught).\n\n"
         "REQUIRED OUTPUT FORMAT:\n"
         "Return ONLY a single valid JSON object (no markdown fences) matching this exact structure:\n"
         "{\n"
@@ -2738,7 +2824,7 @@ def build_system_prompt(
         f"- Teacher's Specific Lesson Topic / Focus: {clean_topic}\n"
         f"- Official Communicative Objectives: {'; '.join(sec['communicative_objectives'])}\n"
         f"- Target Vocabulary: {', '.join(sec['key_vocabulary'])}\n"
-        f"- Implicit Grammar Chunks: {'; '.join(sec['implicit_grammar'])}\n"
+        f"- Target Language Chunks (Teach Implicitly — zero grammar labels): {scrub_learner_meta_terms('; '.join(sec['implicit_grammar']))}\n"
         f"- Phonics / Handwriting Target: {sec['phonics_target']}\n"
         f"- Reading Word Target: ~{sec['reading_word_target']} words | Writing Target: {writing_target_desc}\n\n"
         f"MANDATORY ORDERED STAGES (MUST SUM TO {duration_minutes} MINUTES, WITH 2-3 DETAILED ACTIVITIES IN EACH INSTALL RESOURCES STAGE):\n{stages_guide}\n"
@@ -2771,7 +2857,7 @@ def build_default_lesson_plan(
     )
     comm_obj = "; ".join(sec["communicative_objectives"]).rstrip(".")
     vocab_str = ", ".join(sec["key_vocabulary"])
-    grammar_str = "; ".join(sec["implicit_grammar"])
+    grammar_str = scrub_learner_meta_terms("; ".join(sec["implicit_grammar"]))
 
     if g == "3PS":
         subsidiary_obj = (
@@ -2789,7 +2875,7 @@ def build_default_lesson_plan(
         plan_b = "Use Think-Pair-Share and flashcard prompts; demonstrate cursive joins on board lines first."
     else:
         subsidiary_obj = (
-            f"Notice word order and subject-verb agreement implicitly ({grammar_str}) "
+            f"Notice word order and chunk patterns implicitly ({grammar_str}) "
             f"and reinforce target sounds ({sec['phonics_target']})."
         )
         anticipated = "Difficulty finding details in text or ordering words when transforming form notes into sentences."
@@ -2920,6 +3006,35 @@ def build_default_lesson_plan(
     }
 
 
+_PINNED_HEADER_KEYS: Tuple[str, ...] = (
+    "class_profile",
+    "level",
+    "number_of_learners",
+    "duration",
+    "sequence",
+    "section",
+    "session",
+    "domains",
+    "phonics_focus",
+    "core_values",
+    "cross_curricular_competencies",
+)
+
+_WHITEBOARD_PLACEHOLDER_SNIPPETS: Tuple[str, ...] = (
+    "date, sequence/section/session",
+    "visual flashcards & target vocabulary",
+    "core model chunks / text / form",
+    "classroom star & team points tracker + learner slate practice",
+)
+
+
+def _is_generic_whiteboard_panel(text: str) -> bool:
+    cleaned = (text or "").strip().lower()
+    if len(cleaned) < 20:
+        return True
+    return any(snippet in cleaned for snippet in _WHITEBOARD_PLACEHOLDER_SNIPPETS)
+
+
 def validate_and_normalize_lesson_plan(
     raw_data: Optional[Dict[str, Any]],
     grade: str,
@@ -2930,9 +3045,10 @@ def validate_and_normalize_lesson_plan(
 ) -> Dict[str, Any]:
     """
     Validate an LLM/MCP JSON response against the Algerian Didactic Guide rules,
-    reconciling missing header fields, enforcing the grade's official session
+    pinning canonical Ministry header fields, enforcing the grade's official session
     duration (60 mn for 3PS/4PS, 45 mn for 5PS), scrubbing learner-facing
-    meta-terms, and enforcing non-monetary classroom gamification.
+    meta-terms and explicit grammar labels, ensuring concrete classroom stage
+    materials, and enforcing non-monetary classroom gamification.
     """
     baseline = build_default_lesson_plan(grade, sequence_id, section_id, session_id, topic)
     duration_minutes = int(baseline["meta"]["duration_minutes"])
@@ -2942,20 +3058,22 @@ def validate_and_normalize_lesson_plan(
     result = copy.deepcopy(baseline)
     raw_header = raw_data.get("header") if isinstance(raw_data.get("header"), dict) else {}
 
-    for key, default_val in baseline["header"].items():
+    for key in baseline["header"]:
+        if key in _PINNED_HEADER_KEYS:
+            continue
         val = raw_header.get(key)
         if isinstance(val, str) and val.strip():
-            cleaned = sanitize_non_monetary_gamification(val.strip())
+            cleaned = sanitize_non_monetary_gamification(
+                scrub_learner_meta_terms(val.strip())
+            )
             if key == "session_objectives":
                 cleaned = ensure_objective_formula(cleaned, baseline["header"]["session_objectives"])
-            elif key == "duration":
-                cleaned = f"{duration_minutes} mn"
             result["header"][key] = cleaned
 
     # Always pin objective formula & official level duration
     result["header"]["duration"] = f"{duration_minutes} mn"
     result["header"]["session_objectives"] = ensure_objective_formula(
-        result["header"]["session_objectives"],
+        scrub_learner_meta_terms(result["header"]["session_objectives"]),
         f"interact and practice language related to {result['meta']['topic']}.",
     )
 
@@ -2994,22 +3112,17 @@ def validate_and_normalize_lesson_plan(
             scrub_learner_meta_terms(raw_exit.strip())
         )
 
-    # Whiteboard layout
+    # Whiteboard layout — reject echoed schema placeholders and keep concrete topic board
     raw_wb = raw_data.get("whiteboard_layout")
     if isinstance(raw_wb, dict):
         for panel in ("left_panel", "center_panel", "right_panel"):
             val = raw_wb.get(panel)
-            if isinstance(val, str) and val.strip():
+            if isinstance(val, str) and val.strip() and not _is_generic_whiteboard_panel(val):
                 result["whiteboard_layout"][panel] = sanitize_non_monetary_gamification(
                     scrub_learner_meta_terms(val.strip())
                 )
 
-    # Self reflection
-    raw_sr = raw_data.get("self_reflection")
-    if isinstance(raw_sr, dict):
-        for field in ("what_worked", "what_hindered", "action_plan"):
-            val = raw_sr.get(field)
-            if isinstance(val, str) and val.strip():
-                result["self_reflection"][field] = val.strip()
+    # Self reflection is always kept as post-lesson teacher placeholders
+    result["self_reflection"] = copy.deepcopy(baseline["self_reflection"])
 
     return result
